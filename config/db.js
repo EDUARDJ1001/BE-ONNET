@@ -15,7 +15,7 @@ const connectDB = async () => {
                 database: process.env.DB_NAME,
                 port: process.env.DB_PORT,
                 ssl: {
-                    ca: process.env.DB_SSL_CA,  // ¡Directamente desde la variable!
+                    ca: process.env.DB_SSL_CA.replace(/\\n/g, '\n'), // Esto convierte \n en saltos de línea
                     rejectUnauthorized: true
                 },
                 connectionLimit: 10,
