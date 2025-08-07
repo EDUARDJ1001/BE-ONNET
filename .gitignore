@@ -1,0 +1,7 @@
+.env
+
+ca.pem
+
+/node_modules
+
+/config/db_local.js
