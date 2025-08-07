@@ -9,9 +9,10 @@ dotenv.config();
 const app = express();
 
 app.use(cors({
-    credentials: true,
+  origin: 'https://onnethn.vercel.app/', 
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  credentials: true
 }));
-
 app.use(express.json());
 
 app.get('/', (req, res) => {
