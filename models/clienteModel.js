@@ -11,7 +11,7 @@ export const obtenerClientes = async () => {
   // Trae info base del cliente + nombre del estado y plan (útil para listados)
   const [rows] = await db.execute(`
     SELECT 
-      c.id, c.nombre, c.ip, c.direccion, c.telefono, c.coordenadas,
+      c.id, c.nombre, c.ip, c.direccion, c.telefono, c.pass_onu, c.coordenadas,
       c.plan_id, c.estado_id,
       p.nombre AS plan_nombre, p.precio_mensual,
       ec.descripcion AS nombreEstado
@@ -27,7 +27,7 @@ export const obtenerClientePorId = async (id) => {
   const db = await connectDB();
   const [rows] = await db.execute(`
     SELECT 
-      c.id, c.nombre, c.ip, c.direccion, c.telefono, c.coordenadas,
+      c.id, c.nombre, c.ip, c.direccion, c.telefono, c.pass_onu, c.coordenadas,
       c.plan_id, c.estado_id,
       p.nombre AS plan_nombre, p.precio_mensual,
       ec.descripcion AS nombreEstado
@@ -49,6 +49,7 @@ export const obtenerClientesConEstados = async () => {
       c.ip,
       c.direccion,
       c.telefono,
+      c.pass_onu,
       c.coordenadas,
       c.plan_id,
       c.estado_id,
@@ -74,6 +75,7 @@ export const obtenerClientesConEstados = async () => {
         ip: row.ip,
         direccion: row.direccion,
         telefono: row.telefono,
+        pass_onu: row.pass_onu,
         coordenadas: row.coordenadas,
         plan_id: row.plan_id,
         estado_id: row.estado_id,
@@ -96,7 +98,7 @@ export const obtenerClientesConEstados = async () => {
 
 // Crear cliente con estado_id = 1 (Activo) y crear estado_mensual del mes actual (idempotente)
 export const crearCliente = async (cliente) => { 
-  const { nombre, ip, direccion, coordenadas, telefono, plan_id } = cliente;
+  const { nombre, ip, direccion, coordenadas, telefono, pass_onu, plan_id } = cliente;
   const db = await connectDB();
   const conn = await db.getConnection();
 
@@ -105,9 +107,9 @@ export const crearCliente = async (cliente) => {
 
     // 1) Insert cliente con estado_id = 1
     const [resCliente] = await conn.execute(`
-      INSERT INTO clientes (nombre, ip, direccion, coordenadas, telefono, plan_id, estado_id)
-      VALUES (?, ?, ?, ?, ?, ?, 1)
-    `, [nombre, ip, direccion, coordenadas, telefono, plan_id]);
+      INSERT INTO clientes (nombre, ip, direccion, coordenadas, telefono, pass_onu, plan_id, estado_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+    `, [nombre, ip, direccion, coordenadas, telefono, pass_onu, plan_id]);
 
     const clienteId = resCliente.insertId;
 
@@ -131,12 +133,12 @@ export const crearCliente = async (cliente) => {
 
 // Actualizar cliente (si viene estado_id lo actualiza; si no, lo deja igual)
 export const actualizarCliente = async (id, cliente) => {
-  const { nombre, ip, direccion, coordenadas, telefono, plan_id, estado_id } = cliente;
+  const { nombre, ip, direccion, coordenadas, telefono, pass_onu, plan_id, estado_id } = cliente;
   const db = await connectDB();
 
   // Construimos SQL dinámico para no obligar a enviar estado_id siempre
-  const fields = ['nombre = ?', 'ip = ?', 'direccion = ?', 'coordenadas = ?', 'telefono = ?', 'plan_id = ?'];
-  const params = [nombre, ip, direccion, coordenadas, telefono, plan_id];
+  const fields = ['nombre = ?', 'ip = ?', 'direccion = ?', 'coordenadas = ?', 'telefono = ?', 'pass_onu = ?', 'plan_id = ?'];
+  const params = [nombre, ip, direccion, coordenadas, telefono, pass_onu, plan_id];
 
   if (typeof estado_id !== 'undefined') {
     fields.push('estado_id = ?');

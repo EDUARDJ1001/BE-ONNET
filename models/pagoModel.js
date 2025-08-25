@@ -28,9 +28,6 @@ const calcularEstadoMensual = async (conn, cliente_id, mes, anio) => {
   const acumulado = Number(sumRow.total);
 
   // 3) Determinar estado
-  // Regla: Pagado si acumulado >= precio (y precio > 0).
-  // Parcial si 0 < acumulado < precio.
-  // Si precio == 0: lo tomamos como Pagado si hay algún pago, de lo contrario Pendiente.
   let estado = 'Pendiente';
   if (precioMensual > 0) {
     if (acumulado >= precioMensual) estado = 'Pagado';
@@ -53,18 +50,34 @@ const upsertEstadoMensual = async (conn, cliente_id, mes, anio, estado) => {
 
 export const obtenerPagos = async () => {
   const db = await connectDB();
-  const [rows] = await db.execute('SELECT * FROM pagos');
+  const [rows] = await db.execute(`
+    SELECT p.*, mp.descripcion as metodo_pago_desc 
+    FROM pagos p 
+    LEFT JOIN metodos_pago mp ON p.metodo_id = mp.id
+    ORDER BY p.id DESC
+  `);
   return rows;
 };
 
+export const obtenerMetodosPago = async () => {
+  const db = await connectDB();
+  const [rows] = await db.execute('SELECT * FROM metodos_pago');
+  return rows;
+}
+
 export const obtenerPagoPorId = async (id) => {
   const db = await connectDB();
-  const [rows] = await db.execute('SELECT * FROM pagos WHERE id = ?', [id]);
+  const [rows] = await db.execute(`
+    SELECT p.*, mp.descripcion as metodo_pago_desc 
+    FROM pagos p 
+    LEFT JOIN metodos_pago mp ON p.metodo_id = mp.id
+    WHERE p.id = ?
+  `, [id]);
   return rows[0];
 };
 
 export const crearPago = async (pago) => {
-  const { cliente_id, monto, fecha_pago, observacion } = pago;
+  const { cliente_id, monto, fecha_pago, metodo_id, referencia, observacion } = pago;
   const db = await connectDB();
   const conn = await db.getConnection();
   try {
@@ -72,9 +85,9 @@ export const crearPago = async (pago) => {
 
     // 1) Insertar pago
     const [r1] = await conn.execute(
-      `INSERT INTO pagos (cliente_id, monto, fecha_pago, observacion)
-       VALUES (?, ?, ?, ?)`,
-      [cliente_id, monto, fecha_pago, observacion ?? null]
+      `INSERT INTO pagos (cliente_id, monto, fecha_pago, metodo_id, referencia, observacion)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [cliente_id, monto, fecha_pago, metodo_id, referencia ?? null, observacion ?? null]
     );
 
     // 2) Calcular estado mensual y upsert
@@ -93,7 +106,7 @@ export const crearPago = async (pago) => {
 };
 
 export const actualizarPago = async (id, pago) => {
-  const { cliente_id, monto, fecha_pago, observacion } = pago;
+  const { cliente_id, monto, fecha_pago, metodo_id, referencia, observaciones } = pago;
   const db = await connectDB();
   const conn = await db.getConnection();
   try {
@@ -109,9 +122,9 @@ export const actualizarPago = async (id, pago) => {
     // 2) Actualizar pago
     await conn.execute(
       `UPDATE pagos
-       SET cliente_id = ?, monto = ?, fecha_pago = ?, observacion = ?
+       SET cliente_id = ?, monto = ?, fecha_pago = ?, metodo_id = ?, referencia = ?, observacion = ?
        WHERE id = ?`,
-      [cliente_id, monto, fecha_pago, observacion ?? null, id]
+      [cliente_id, monto, fecha_pago, metodo_id, referencia ?? null, observacion ?? null, id]
     );
 
     // 3) Recalcular estado del mes/anio previo
