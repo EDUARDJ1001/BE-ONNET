@@ -68,6 +68,17 @@ export const getResumenPagosCliente = async (req, res) => {
   }
 };
 
+export const getMesesPendientes = async (req, res) => {
+  try {
+    const { cliente_id } = req.params;
+    const mesesPendientes = await PagoModel.obtenerMesesPendientes(cliente_id);
+    res.json(mesesPendientes);
+  } catch (error) {
+    console.error('Error al obtener meses pendientes:', error);
+    res.status(500).json({ message: 'Error del servidor' });
+  }
+};
+
 export const createPago = async (req, res) => {
   try {
     const { cliente_id, monto, fecha_pago, metodo_id, referencia, observacion, mes_aplicado, anio_aplicado } = req.body;
@@ -107,6 +118,66 @@ export const createPago = async (req, res) => {
     console.error('Error al registrar pago:', error);
     
     if (error.message === 'No se pueden registrar pagos para meses futuros') {
+      return res.status(400).json({ message: error.message });
+    }
+    
+    res.status(500).json({ message: 'Error del servidor' });
+  }
+};
+
+export const createPagosMultiples = async (req, res) => {
+  try {
+    const { cliente_id, monto_total, fecha_pago, metodo_id, referencia, observacion, meses } = req.body;
+    
+    // Validaciones básicas
+    if (!cliente_id || !monto_total || !fecha_pago || !metodo_id || !meses || !Array.isArray(meses)) {
+      return res.status(400).json({ 
+        message: 'cliente_id, monto_total, fecha_pago, metodo_id y meses (array) son requeridos.' 
+      });
+    }
+
+    if (monto_total <= 0) {
+      return res.status(400).json({ 
+        message: 'El monto total debe ser mayor a 0.' 
+      });
+    }
+
+    if (meses.length === 0) {
+      return res.status(400).json({ 
+        message: 'Debe especificar al menos un mes para el pago.' 
+      });
+    }
+
+    // Validar estructura de los meses
+    for (const mes of meses) {
+      if (!mes.mes || !mes.anio) {
+        return res.status(400).json({ 
+          message: 'Cada mes debe tener "mes" y "anio" definidos.' 
+        });
+      }
+    }
+
+    const pagosData = {
+      cliente_id,
+      monto_total: parseFloat(monto_total),
+      fecha_pago,
+      metodo_id,
+      referencia: referencia || null,
+      observacion: observacion || null,
+      meses
+    };
+
+    const resultados = await PagoModel.crearPagosMultiplesMeses(pagosData);
+    res.status(201).json({ 
+      message: `Pagos registrados exitosamente para ${meses.length} meses`,
+      pagos: resultados,
+      total_meses: meses.length,
+      monto_por_mes: monto_total / meses.length
+    });
+  } catch (error) {
+    console.error('Error al registrar pagos múltiples:', error);
+    
+    if (error.message.includes('No se pueden registrar pagos para meses futuros')) {
       return res.status(400).json({ message: error.message });
     }
     

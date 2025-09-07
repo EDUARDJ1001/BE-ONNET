@@ -1,10 +1,19 @@
 import express from 'express';
-import { obtenerPlanes, obtenerPlanesPorId } from '../controllers/planController.js';
+import { 
+  obtenerPlanes, 
+  obtenerPlanPorIdController, 
+  crearPlanController,
+  actualizarPlanController,
+  eliminarPlanController
+} from '../controllers/planController.js';
 
 const router = express.Router();
 
-// Ruta para obtener los planes
+// Principal /api/planes
 router.get("/", obtenerPlanes);
-router.get("/:id", obtenerPlanesPorId);
+router.get("/:id", obtenerPlanPorIdController);
+router.post("/", crearPlanController);
+router.put("/:id", actualizarPlanController);
+router.delete("/:id", eliminarPlanController);
 
 export default router;

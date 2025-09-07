@@ -8,24 +8,33 @@ import {
     getResumenPagosCliente,
     createPago,
     updatePago,
-    deletePago
+    deletePago,
+    getMesesPendientes,
+    createPagosMultiples
 } from '../controllers/pagoController.js';
 
 // ruta main /api/pagos
 
 const router = express.Router();
 
-// Rutas principales
+// Rutas GET
 router.get('/', getPagos);
 router.get('/metodos', getMetodosPago);
 router.get('/:id', getPagoById);
-router.post('/', createPago);
-router.put('/:id', updatePago);
-router.delete('/:id', deletePago);
-
-// Nuevas rutas para filtros específicos
 router.get('/cliente/:cliente_id', getPagosPorCliente);
 router.get('/mes/:mes/:anio', getPagosPorMes);
 router.get('/resumen/:cliente_id/:mes/:anio', getResumenPagosCliente);
+router.get('/meses-pendientes/:cliente_id', getMesesPendientes);
+
+// Rutas POST
+router.post('/', createPago);
+router.post('/multiples', createPagosMultiples); // Nueva ruta para pagos múltiples
+
+// Rutas PUT y DELETE
+router.put('/:id', updatePago);
+router.delete('/:id', deletePago);
 
 export default router;
+
+
+

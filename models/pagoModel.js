@@ -1,20 +1,12 @@
 import connectDB from '../config/db.js';
 
-const getMesAnio = (dateStr) => {
-  const d = new Date(dateStr);
-  return { mes: d.getMonth() + 1, anio: d.getFullYear() };
-};
-
 // Función para determinar a qué mes aplica el pago
 const determinarMesAplicado = (fechaPago, mesPagoEspecifico = null, anioPagoEspecifico = null) => {
   if (mesPagoEspecifico && anioPagoEspecifico) {
-    return { mes: mesPagoEspecifico, anio: anioPagoEspecifico };
+    return { mes: parseInt(mesPagoEspecifico), anio: parseInt(anioPagoEspecifico) };
   }
   
-  const hoy = new Date();
   const fechaPagoDate = new Date(fechaPago);
-  
-  // Si no se especifica mes, usar el mes de la fecha de pago
   return { 
     mes: fechaPagoDate.getMonth() + 1, 
     anio: fechaPagoDate.getFullYear() 
@@ -66,12 +58,19 @@ const upsertEstadoMensual = async (conn, cliente_id, mes, anio, estado) => {
   );
 };
 
+// Validar que el mes aplicado no sea futuro
+const validarMesAplicado = (mes, anio) => {
+  const hoy = new Date();
+  const mesAplicadoDate = new Date(anio, mes - 1, 1);
+  return mesAplicadoDate <= hoy;
+};
+
 // Obtener todos los pagos
 export const obtenerPagos = async () => {
   const db = await connectDB();
   const [rows] = await db.execute(`
     SELECT p.*, mp.descripcion as metodo_pago_desc,
-           c.nombre as cliente_nombre, c.apellido as cliente_apellido
+           c.nombre as cliente_nombre
     FROM pagos p 
     LEFT JOIN metodos_pago mp ON p.metodo_id = mp.id
     LEFT JOIN clientes c ON p.cliente_id = c.id
@@ -92,7 +91,7 @@ export const obtenerPagoPorId = async (id) => {
   const db = await connectDB();
   const [rows] = await db.execute(`
     SELECT p.*, mp.descripcion as metodo_pago_desc,
-           c.nombre as cliente_nombre, c.apellido as cliente_apellido,
+           c.nombre as cliente_nombre,
            c.plan_id, pl.nombre as plan_nombre
     FROM pagos p 
     LEFT JOIN metodos_pago mp ON p.metodo_id = mp.id
@@ -121,7 +120,7 @@ export const obtenerPagosPorMes = async (mes, anio) => {
   const db = await connectDB();
   const [rows] = await db.execute(`
     SELECT p.*, mp.descripcion as metodo_pago_desc,
-           c.nombre as cliente_nombre, c.apellido as cliente_apellido
+           c.nombre as cliente_nombre
     FROM pagos p 
     LEFT JOIN metodos_pago mp ON p.metodo_id = mp.id
     LEFT JOIN clientes c ON p.cliente_id = c.id
@@ -136,6 +135,7 @@ export const crearPago = async (pago) => {
   const { cliente_id, monto, fecha_pago, metodo_id, referencia, observacion, mes_aplicado, anio_aplicado } = pago;
   const db = await connectDB();
   const conn = await db.getConnection();
+  
   try {
     await conn.beginTransaction();
 
@@ -147,9 +147,7 @@ export const crearPago = async (pago) => {
     );
 
     // Validar que el mes aplicado no sea futuro
-    const hoy = new Date();
-    const mesAplicadoDate = new Date(anioAplicado, mesAplicado - 1, 1);
-    if (mesAplicadoDate > hoy) {
+    if (!validarMesAplicado(mesAplicado, anioAplicado)) {
       throw new Error('No se pueden registrar pagos para meses futuros');
     }
 
@@ -165,7 +163,69 @@ export const crearPago = async (pago) => {
     await upsertEstadoMensual(conn, cliente_id, mesAplicado, anioAplicado, estado);
 
     await conn.commit();
-    return { id: result.insertId, mes_aplicado: mesAplicado, anio_aplicado: anioAplicado };
+    return { 
+      id: result.insertId, 
+      mes_aplicado: mesAplicado, 
+      anio_aplicado: anioAplicado 
+    };
+  } catch (e) {
+    await conn.rollback();
+    throw e;
+  } finally {
+    conn.release();
+  }
+};
+
+// Crear pagos para múltiples meses
+export const crearPagosMultiplesMeses = async (pagosData) => {
+  const { cliente_id, monto_total, fecha_pago, metodo_id, referencia, observacion, meses } = pagosData;
+  const db = await connectDB();
+  const conn = await db.getConnection();
+  
+  try {
+    await conn.beginTransaction();
+
+    // Validar que todos los meses no sean futuros
+    for (const mesData of meses) {
+      if (!validarMesAplicado(mesData.mes, mesData.anio)) {
+        throw new Error(`No se pueden registrar pagos para meses futuros: ${mesData.mes}/${mesData.anio}`);
+      }
+    }
+
+    const resultados = [];
+    const montoPorMes = monto_total / meses.length;
+
+    for (const mesData of meses) {
+      // 1) Insertar pago para cada mes
+      const [result] = await conn.execute(
+        `INSERT INTO pagos (cliente_id, monto, fecha_pago, metodo_id, referencia, observacion, mes_aplicado, anio_aplicado)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          cliente_id, 
+          montoPorMes, 
+          fecha_pago, 
+          metodo_id, 
+          referencia ?? null, 
+          observacion ?? null, 
+          mesData.mes, 
+          mesData.anio
+        ]
+      );
+
+      // 2) Calcular estado mensual y upsert para cada mes
+      const estado = await calcularEstadoMensual(conn, cliente_id, mesData.mes, mesData.anio);
+      await upsertEstadoMensual(conn, cliente_id, mesData.mes, mesData.anio, estado);
+
+      resultados.push({
+        id: result.insertId,
+        mes_aplicado: mesData.mes,
+        anio_aplicado: mesData.anio,
+        monto: montoPorMes
+      });
+    }
+
+    await conn.commit();
+    return resultados;
   } catch (e) {
     await conn.rollback();
     throw e;
@@ -179,6 +239,7 @@ export const actualizarPago = async (id, pago) => {
   const { cliente_id, monto, fecha_pago, metodo_id, referencia, observacion, mes_aplicado, anio_aplicado } = pago;
   const db = await connectDB();
   const conn = await db.getConnection();
+  
   try {
     await conn.beginTransaction();
 
@@ -195,9 +256,7 @@ export const actualizarPago = async (id, pago) => {
     );
 
     // Validar que el mes aplicado no sea futuro
-    const hoy = new Date();
-    const mesAplicadoDate = new Date(newAnioAplicado, newMesAplicado - 1, 1);
-    if (mesAplicadoDate > hoy) {
+    if (!validarMesAplicado(newMesAplicado, newAnioAplicado)) {
       throw new Error('No se pueden registrar pagos para meses futuros');
     }
 
@@ -207,27 +266,24 @@ export const actualizarPago = async (id, pago) => {
        SET cliente_id = ?, monto = ?, fecha_pago = ?, metodo_id = ?, referencia = ?, 
            observacion = ?, mes_aplicado = ?, anio_aplicado = ?
        WHERE id = ?`,
-      [cliente_id, monto, fecha_pago, metodo_id, referencia ?? null, 
-       observacion ?? null, newMesAplicado, newAnioAplicado, id]
+      [
+        cliente_id, monto, fecha_pago, metodo_id, referencia ?? null, 
+        observacion ?? null, newMesAplicado, newAnioAplicado, id
+      ]
     );
 
     // 3) Recalcular todos los meses afectados
     const mesesAActualizar = new Set();
     
-    // Mes original del pago (cliente original)
+    // Mes original del pago
     mesesAActualizar.add(`${old.mes_aplicado}-${old.anio_aplicado}-${old.cliente_id}`);
     
-    // Nuevo mes del pago (nuevo cliente)
+    // Nuevo mes del pago
     mesesAActualizar.add(`${newMesAplicado}-${newAnioAplicado}-${cliente_id}`);
     
-    // Si cambió el cliente, también recalcular el nuevo mes para el cliente anterior
+    // Si cambió el cliente, recalcular el mes original para el cliente anterior
     if (old.cliente_id !== cliente_id) {
-      mesesAActualizar.add(`${old.mes_aplicado}-${old.anio_aplicado}-${cliente_id}`);
-    }
-
-    // Si cambió el mes, recalcular el mes original con el nuevo cliente
-    if (old.mes_aplicado !== newMesAplicado || old.anio_aplicado !== newAnioAplicado) {
-      mesesAActualizar.add(`${old.mes_aplicado}-${old.anio_aplicado}-${cliente_id}`);
+      mesesAActualizar.add(`${old.mes_aplicado}-${old.anio_aplicado}-${old.cliente_id}`);
     }
 
     // Recalcular cada mes afectado
@@ -242,7 +298,11 @@ export const actualizarPago = async (id, pago) => {
     }
 
     await conn.commit();
-    return { affectedRows: 1, mes_aplicado: newMesAplicado, anio_aplicado: newAnioAplicado };
+    return { 
+      affectedRows: 1, 
+      mes_aplicado: newMesAplicado, 
+      anio_aplicado: newAnioAplicado 
+    };
   } catch (e) {
     await conn.rollback();
     throw e;
@@ -255,6 +315,7 @@ export const actualizarPago = async (id, pago) => {
 export const eliminarPago = async (id) => {
   const db = await connectDB();
   const conn = await db.getConnection();
+  
   try {
     await conn.beginTransaction();
 
@@ -286,7 +347,6 @@ export const obtenerResumenPagosCliente = async (cliente_id, mes, anio) => {
   const [rows] = await db.execute(`
     SELECT 
       c.nombre,
-      c.apellido,
       p.precio_mensual,
       COALESCE(SUM(pg.monto), 0) as total_pagado,
       CASE 
@@ -304,4 +364,28 @@ export const obtenerResumenPagosCliente = async (cliente_id, mes, anio) => {
   `, [mes, anio, cliente_id]);
   
   return rows[0] || null;
+};
+
+// Obtener meses pendientes de pago para un cliente
+export const obtenerMesesPendientes = async (cliente_id) => {
+  const db = await connectDB();
+  const [rows] = await db.execute(`
+    SELECT 
+      em.mes,
+      em.anio,
+      em.estado,
+      p.precio_mensual,
+      (SELECT COALESCE(SUM(monto), 0) 
+       FROM pagos 
+       WHERE cliente_id = ? 
+         AND mes_aplicado = em.mes 
+         AND anio_aplicado = em.anio) as total_pagado
+    FROM estado_mensual em
+    JOIN clientes c ON em.cliente_id = c.id
+    JOIN planes p ON c.plan_id = p.id
+    WHERE em.cliente_id = ?
+    ORDER BY em.anio DESC, em.mes DESC
+  `, [cliente_id, cliente_id]);
+  
+  return rows;
 };
