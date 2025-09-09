@@ -15,15 +15,17 @@ const determinarMesAplicado = (fechaPago, mesPagoEspecifico = null, anioPagoEspe
 
 // Función para calcular estado mensual
 const calcularEstadoMensual = async (conn, cliente_id, mes, anio) => {
-  // 1) Traer precio del plan del cliente
   const [[cli]] = await conn.execute(
     `SELECT p.precio_mensual
-     FROM clientes c
-     JOIN planes p ON p.id = c.plan_id
-     WHERE c.id = ?`,
+       FROM clientes c
+       JOIN planes p ON p.id = c.plan_id
+      WHERE c.id = ?`,
     [cliente_id]
   );
-  const precioMensual = Number(cli?.precio_mensual ?? 0);
+  if (!cli) {
+    throw new Error(`Cliente ${cliente_id} sin plan asociado`);
+  }
+  const precioMensual = Number(cli.precio_mensual ?? 0);
 
   // 2) Acumulado del mes específico
   const [[sumRow]] = await conn.execute(
@@ -176,52 +178,49 @@ export const crearPago = async (pago) => {
   }
 };
 
-// Crear pagos para múltiples meses
+const repartirMonto = (total, n) => {
+  const cents = Math.round(Number(total) * 100);
+  const base = Math.floor(cents / n);
+  let remainder = cents - base * n;
+  const parts = Array.from({ length: n }, () => base);
+  // reparte el remanente sumando 1 centavo a las primeras 'remainder' partes
+  for (let i = 0; i < remainder; i++) parts[i] += 1;
+  return parts.map(c => c / 100);
+};
+
 export const crearPagosMultiplesMeses = async (pagosData) => {
   const { cliente_id, monto_total, fecha_pago, metodo_id, referencia, observacion, meses } = pagosData;
   const db = await connectDB();
   const conn = await db.getConnection();
-  
+
   try {
     await conn.beginTransaction();
 
     // Validar que todos los meses no sean futuros
-    for (const mesData of meses) {
-      if (!validarMesAplicado(mesData.mes, mesData.anio)) {
-        throw new Error(`No se pueden registrar pagos para meses futuros: ${mesData.mes}/${mesData.anio}`);
+    for (const { mes, anio } of meses) {
+      if (!validarMesAplicado(mes, anio)) {
+        throw new Error(`No se pueden registrar pagos para meses futuros: ${mes}/${anio}`);
       }
     }
 
     const resultados = [];
-    const montoPorMes = monto_total / meses.length;
+    // <<< usar repartición exacta>>>
+    const montos = repartirMonto(monto_total, meses.length);
 
-    for (const mesData of meses) {
-      // 1) Insertar pago para cada mes
+    for (let i = 0; i < meses.length; i++) {
+      const { mes, anio } = meses[i];
+      const montoPorMes = montos[i];
+
       const [result] = await conn.execute(
         `INSERT INTO pagos (cliente_id, monto, fecha_pago, metodo_id, referencia, observacion, mes_aplicado, anio_aplicado)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          cliente_id, 
-          montoPorMes, 
-          fecha_pago, 
-          metodo_id, 
-          referencia ?? null, 
-          observacion ?? null, 
-          mesData.mes, 
-          mesData.anio
-        ]
+        [cliente_id, montoPorMes, fecha_pago, metodo_id, referencia ?? null, observacion ?? null, mes, anio]
       );
 
-      // 2) Calcular estado mensual y upsert para cada mes
-      const estado = await calcularEstadoMensual(conn, cliente_id, mesData.mes, mesData.anio);
-      await upsertEstadoMensual(conn, cliente_id, mesData.mes, mesData.anio, estado);
+      const estado = await calcularEstadoMensual(conn, cliente_id, mes, anio);
+      await upsertEstadoMensual(conn, cliente_id, mes, anio, estado);
 
-      resultados.push({
-        id: result.insertId,
-        mes_aplicado: mesData.mes,
-        anio_aplicado: mesData.anio,
-        monto: montoPorMes
-      });
+      resultados.push({ id: result.insertId, mes_aplicado: mes, anio_aplicado: anio, monto: montoPorMes });
     }
 
     await conn.commit();
@@ -233,6 +232,7 @@ export const crearPagosMultiplesMeses = async (pagosData) => {
     conn.release();
   }
 };
+
 
 // Actualizar pago existente
 export const actualizarPago = async (id, pago) => {
@@ -369,23 +369,30 @@ export const obtenerResumenPagosCliente = async (cliente_id, mes, anio) => {
 // Obtener meses pendientes de pago para un cliente
 export const obtenerMesesPendientes = async (cliente_id) => {
   const db = await connectDB();
+  const hoy = new Date();
+  const y = hoy.getFullYear();
+  const m = hoy.getMonth() + 1;
+
   const [rows] = await db.execute(`
     SELECT 
+      em.id,              -- << añade id >>
       em.mes,
       em.anio,
       em.estado,
       p.precio_mensual,
       (SELECT COALESCE(SUM(monto), 0) 
-       FROM pagos 
-       WHERE cliente_id = ? 
-         AND mes_aplicado = em.mes 
-         AND anio_aplicado = em.anio) as total_pagado
+         FROM pagos 
+        WHERE cliente_id = ? 
+          AND mes_aplicado = em.mes 
+          AND anio_aplicado = em.anio) AS total_pagado
     FROM estado_mensual em
     JOIN clientes c ON em.cliente_id = c.id
-    JOIN planes p ON c.plan_id = p.id
-    WHERE em.cliente_id = ?
-    ORDER BY em.anio DESC, em.mes DESC
-  `, [cliente_id, cliente_id]);
-  
+    JOIN planes p   ON c.plan_id = p.id
+   WHERE em.cliente_id = ?
+     AND (em.anio < ? OR (em.anio = ? AND em.mes <= ?))  -- solo hasta hoy
+     AND em.estado <> 'Pagado'                            -- solo no pagados
+   ORDER BY em.anio DESC, em.mes DESC
+  `, [cliente_id, cliente_id, y, y, m]);
+
   return rows;
 };

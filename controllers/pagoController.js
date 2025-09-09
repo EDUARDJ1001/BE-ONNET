@@ -168,11 +168,11 @@ export const createPagosMultiples = async (req, res) => {
     };
 
     const resultados = await PagoModel.crearPagosMultiplesMeses(pagosData);
-    res.status(201).json({ 
+    res.status(201).json({
       message: `Pagos registrados exitosamente para ${meses.length} meses`,
       pagos: resultados,
       total_meses: meses.length,
-      monto_por_mes: monto_total / meses.length
+      monto_por_mes: resultados.map(r => r.monto) // ahora exactos por posición
     });
   } catch (error) {
     console.error('Error al registrar pagos múltiples:', error);
