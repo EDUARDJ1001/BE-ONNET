@@ -91,35 +91,54 @@ export const crearCliente = async (cliente) => {
       nombre, 
       ip, 
       direccion, 
-      coordenadasValue,  // Convertido a null si es undefined
+      coordenadasValue,
       telefono, 
       pass_onu, 
       plan_id, 
-      diaPagoValue,      // Convertido a null si es undefined
+      diaPagoValue,
       fechaInstalacionFormateada
     ]);
 
     const clienteId = resCliente.insertId;
 
-    // 4) Generar estados mensuales desde la fecha de instalación hasta el mes actual
-    const fechaInicio = new Date(fechaInstalacionFormateada);
-    const fechaActual = new Date();
+    // 4) Generar estados mensuales para todo el año actual
+    const fechaInstalacion = new Date(fechaInstalacionFormateada);
+    const ahora = new Date();
+    const añoActual = ahora.getFullYear();
+    const mesActual = ahora.getMonth() + 1; // Mes actual (1-12)
     
-    // Si la fecha de instalación es futura, usar fecha actual
-    const fechaInicioServicio = fechaInicio > fechaActual ? fechaActual : fechaInicio;
+    // Generar todos los meses del año actual (1 al 12)
+    const todosLosMeses = Array.from({ length: 12 }, (_, i) => i + 1);
     
-    const meses = generarMesesEntreFechas(fechaInicioServicio, fechaActual);
+    // Determinar qué meses deben estar como "Pagado"
+    const mesInstalacion = fechaInstalacion.getMonth() + 1; // Mes de instalación (1-12)
+    const añoInstalacion = fechaInstalacion.getFullYear();
     
-    if (meses.length > 0) {
-      // Crear placeholders para la inserción múltiple
-      const placeholders = meses.map(() => '(?, ?, ?, ?)').join(', ');
-      const values = meses.flatMap(({ mes, anio }) => 
-        [clienteId, mes, anio, 'Pendiente']
-      );
-      
+    let mesesPagados = [];
+    
+    if (añoInstalacion === añoActual) {
+      // Todos los meses desde ENERO hasta el mes de instalación (incluyendo)
+      mesesPagados = todosLosMeses.filter(mes => mes <= mesInstalacion);
+    } else if (añoInstalacion < añoActual) {
+      // Si la instalación fue en año anterior: todos los meses son "Pagado"
+      mesesPagados = todosLosMeses;
+    }
+    // Si la instalación es futura (año > actual), mesesPagados queda vacío
+
+    // Preparar los valores para la inserción
+    const values = [];
+    const placeholders = [];
+    
+    todosLosMeses.forEach(mes => {
+      const estado = mesesPagados.includes(mes) ? 'Pagado' : 'Pendiente';
+      values.push(clienteId, mes, añoActual, estado);
+      placeholders.push('(?, ?, ?, ?)');
+    });
+
+    if (values.length > 0) {
       await conn.execute(`
         INSERT INTO estado_mensual (cliente_id, mes, anio, estado)
-        VALUES ${placeholders}
+        VALUES ${placeholders.join(', ')}
         ON DUPLICATE KEY UPDATE estado = estado
       `, values);
     }
@@ -172,25 +191,26 @@ export const actualizarCliente = async (id, cliente) => {
 };
 
 // Función auxiliar para formatear fechas para MySQL
-const formatFechaParaMySQL = (fecha) => {
+export const formatFechaParaMySQL = (fecha) => {
   if (!fecha) return null;
   
-  // Si ya está en formato YYYY-MM-DD, retornar tal cual
-  if (typeof fecha === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
-    return fecha;
+  try {
+    const dateObj = new Date(fecha);
+    
+    // Si la fecha es inválida
+    if (isNaN(dateObj.getTime())) {
+      return new Date().toISOString().split('T')[0];
+    }
+    
+    // Compensar el timezone offset para mantener la fecha local
+    const offset = dateObj.getTimezoneOffset();
+    const localDate = new Date(dateObj.getTime() - (offset * 60 * 1000));
+    
+    return localDate.toISOString().split('T')[0];
+  } catch (error) {
+    console.error('Error formateando fecha:', error);
+    return new Date().toISOString().split('T')[0];
   }
-  
-  // Si es una fecha ISO o Date object, formatear a YYYY-MM-DD
-  const dateObj = new Date(fecha);
-  if (isNaN(dateObj.getTime())) {
-    return null; // Fecha inválida
-  }
-  
-  const year = dateObj.getFullYear();
-  const month = String(dateObj.getMonth() + 1).padStart(2, '0');
-  const day = String(dateObj.getDate()).padStart(2, '0');
-  
-  return `${year}-${month}-${day}`;
 };
 
 
