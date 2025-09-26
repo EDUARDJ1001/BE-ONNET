@@ -261,7 +261,7 @@ export const obtenerPagosPorCliente = async (cliente_id) => {
   return rows;
 };
 
-// Obtener pagos por mes y año
+// Obtener pagos por mes y año (basado en fecha_pago)
 export const obtenerPagosPorMes = async (mes, anio) => {
   const db = await connectDB();
   const [rows] = await db.execute(`
@@ -270,7 +270,7 @@ export const obtenerPagosPorMes = async (mes, anio) => {
       FROM pagos p 
  LEFT JOIN metodos_pago mp ON p.metodo_id = mp.id
  LEFT JOIN clientes c      ON p.cliente_id = c.id
-     WHERE p.mes_aplicado = ? AND p.anio_aplicado = ?
+     WHERE MONTH(p.fecha_pago) = ? AND YEAR(p.fecha_pago) = ?
   ORDER BY p.fecha_pago DESC, p.id DESC
   `, [mes, anio]);
   return rows;
