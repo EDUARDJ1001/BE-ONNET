@@ -6,6 +6,7 @@ import gastoRoutes from './gastoRoutes.js';
 import metodosPagoRoutes from './metodosPagoRoutes.js';
 import pagoRoutes from './pagoRoutes.js';
 import planRoutes from './planRoutes.js';
+import tvRoutes from './tvRoutes.js';
 import userRoutes from './userRoutes.js';
 
 const registerRoutes = (app) => {
@@ -17,6 +18,7 @@ const registerRoutes = (app) => {
     app.use('/api/metodos-pago', metodosPagoRoutes);
     app.use('/api/pagos', pagoRoutes);
     app.use('/api/planes', planRoutes);
+    app.use('/api/tv', tvRoutes);
     app.use('/api/users', userRoutes);
 
 };
