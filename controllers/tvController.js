@@ -17,6 +17,8 @@ import {
   crearClienteTV,
   actualizarClienteTV,
   eliminarClienteTV,
+  obtenerClienteTVPorUsuario,
+  obtenerClientesProximosAVencer,
   // Dispositivos
   obtenerDispositivosPorCliente,
   obtenerDispositivoTVPorId,
@@ -155,11 +157,39 @@ export const getClienteTVById = async (req, res) => {
   }
 };
 
+export const getClienteTVPorUsuario = async (req, res) => {
+  try {
+    const { usuario } = req.params;
+    const cli = await obtenerClienteTVPorUsuario(usuario);
+    if (!cli) return res.status(404).json({ message: "Cliente no encontrado" });
+    res.status(200).json(cli);
+  } catch (e) {
+    res.status(500).json({ message: "Error al obtener cliente por usuario", error: e.message });
+  }
+};
+
+export const getClientesProximosAVencer = async (req, res) => {
+  try {
+    const { dias = 7 } = req.query;
+    const data = await obtenerClientesProximosAVencer(Number(dias));
+    res.status(200).json(data);
+  } catch (e) {
+    res.status(500).json({ message: "Error al obtener clientes próximos a vencer", error: e.message });
+  }
+};
+
 export const postClienteTV = async (req, res) => {
   try {
     const id = await crearClienteTV(req.body);
-    res.status(201).json({ message: "Cliente creado", id });
+    res.status(201).json({ message: "Cliente creado exitosamente", id });
   } catch (e) {
+    // Manejo específico de errores de validación
+    if (e.message === "El nombre de usuario ya existe") {
+      return res.status(409).json({ message: e.message });
+    }
+    if (e.message.includes("requeridos")) {
+      return res.status(400).json({ message: e.message });
+    }
     res.status(500).json({ message: "Error al crear cliente", error: e.message });
   }
 };
@@ -168,8 +198,12 @@ export const putClienteTV = async (req, res) => {
   try {
     const ok = await actualizarClienteTV(req.params.id, req.body);
     if (!ok) return res.status(404).json({ message: "Cliente no encontrado" });
-    res.status(200).json({ message: "Cliente actualizado" });
+    res.status(200).json({ message: "Cliente actualizado exitosamente" });
   } catch (e) {
+    // Manejo específico de errores de validación
+    if (e.message === "El nombre de usuario ya existe") {
+      return res.status(409).json({ message: e.message });
+    }
     res.status(500).json({ message: "Error al actualizar cliente", error: e.message });
   }
 };
@@ -178,7 +212,7 @@ export const deleteClienteTV = async (req, res) => {
   try {
     const ok = await eliminarClienteTV(req.params.id);
     if (!ok) return res.status(404).json({ message: "Cliente no encontrado" });
-    res.status(200).json({ message: "Cliente eliminado" });
+    res.status(200).json({ message: "Cliente eliminado exitosamente" });
   } catch (e) {
     res.status(500).json({ message: "Error al eliminar cliente", error: e.message });
   }
@@ -235,7 +269,7 @@ export const deleteDispositivoTV = async (req, res) => {
   }
 };
 
-/** Opcional: validar si existe MAC ya registrada */
+/** Validar si existe MAC ya registrada */
 export const getDispositivoPorMAC = async (req, res) => {
   try {
     const { mac } = req.query;

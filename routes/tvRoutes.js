@@ -15,6 +15,8 @@ import {
   // Clientes
   getClientesTV,
   getClienteTVById,
+  getClienteTVPorUsuario,
+  getClientesProximosAVencer,
   postClienteTV,
   putClienteTV,
   deleteClienteTV,
@@ -57,6 +59,8 @@ router.delete("/estados/:id", deleteEstadoClienteTV);
  *  ========================= */
 router.get("/clientes", getClientesTV);
 router.get("/clientes/:id", getClienteTVById);
+router.get("/clientes/usuario/:usuario", getClienteTVPorUsuario);
+router.get("/clientes/vencimientos/proximos", getClientesProximosAVencer);
 router.post("/clientes", postClienteTV);
 router.put("/clientes/:id", putClienteTV);
 router.delete("/clientes/:id", deleteClienteTV);

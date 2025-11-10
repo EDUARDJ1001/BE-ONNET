@@ -99,21 +99,21 @@ export const obtenerEstadoClienteTVPorId = async (id) => {
   return rows[0] || null;
 };
 
-export const crearEstadoClienteTV = async ({ descripcion }) => {
-  if (!descripcion) throw new Error("descripcion es requerida");
+export const crearEstadoClienteTV = async ({ nombre, descripcion }) => {
+  if (!nombre) throw new Error("nombre es requerido");
   const conn = await connectDB();
   const [res] = await conn.query(
-    `INSERT INTO estadosClientes (descripcion) VALUES (?)`,
-    [descripcion]
+    `INSERT INTO estadosClientes (nombre, descripcion) VALUES (?, ?)`,
+    [nombre, descripcion || null]
   );
   return res.insertId;
 };
 
-export const actualizarEstadoClienteTV = async (id, { descripcion }) => {
+export const actualizarEstadoClienteTV = async (id, { nombre, descripcion }) => {
   const conn = await connectDB();
   const [res] = await conn.query(
-    `UPDATE estadosClientes SET descripcion = ? WHERE id = ?`,
-    [descripcion, id]
+    `UPDATE estadosClientes SET nombre = ?, descripcion = ? WHERE id = ?`,
+    [nombre, descripcion || null, id]
   );
   return res.affectedRows > 0;
 };
@@ -148,8 +148,8 @@ export const obtenerClientesTV = async ({ estado_id, plantv_id, search } = {}) =
     params.push(plantv_id);
   }
   if (search) {
-    where += ` AND (c.nombre LIKE ? OR c.telefono LIKE ? OR c.direccion LIKE ?)`;
-    params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+    where += ` AND (c.nombre LIKE ? OR c.usuario LIKE ? OR c.telefono LIKE ? OR c.direccion LIKE ?)`;
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
   }
 
   const [rows] = await conn.query(
@@ -158,8 +158,15 @@ export const obtenerClientesTV = async ({ estado_id, plantv_id, search } = {}) =
       c.*,
       p.nombre AS plan_nombre,
       p.precio_mensual AS plan_precio_mensual,
+      e.descripcion AS estado_nombre,
       e.descripcion AS estado_descripcion,
-      (SELECT COUNT(1) FROM dispositivos_tv d WHERE d.cliente_id = c.id) AS total_dispositivos
+      (SELECT COUNT(1) FROM dispositivos_tv d WHERE d.cliente_id = c.id) AS total_dispositivos,
+      DATEDIFF(c.fecha_expiracion, CURDATE()) AS dias_restantes,
+      CASE 
+        WHEN c.fecha_expiracion < CURDATE() THEN 'Expirado'
+        WHEN DATEDIFF(c.fecha_expiracion, CURDATE()) <= 7 THEN 'Por Expirar'
+        ELSE 'Vigente'
+      END AS estado_vencimiento
     FROM clientestv c
     INNER JOIN planestv p ON p.id = c.plantv_id
     INNER JOIN estadosClientes e ON e.id = c.estado_id
@@ -183,7 +190,10 @@ export const obtenerClienteTVPorId = async (id) => {
       c.*,
       p.nombre AS plan_nombre,
       p.precio_mensual AS plan_precio_mensual,
-      e.descripcion AS estado_descripcion
+      e.descripcion AS estado_nombre,
+      e.descripcion AS estado_descripcion,
+      (SELECT COUNT(1) FROM dispositivos_tv d WHERE d.cliente_id = c.id) AS total_dispositivos,
+      DATEDIFF(c.fecha_expiracion, CURDATE()) AS dias_restantes
     FROM clientestv c
     INNER JOIN planestv p ON p.id = c.plantv_id
     INNER JOIN estadosClientes e ON e.id = c.estado_id
@@ -196,14 +206,26 @@ export const obtenerClienteTVPorId = async (id) => {
 
 /**
  * POST /api/tv/clientes
- * Inserta cliente (estado por default = 1 Activo si no viene)
- * Crea estados mensuales del año actual en `estado_mensual_tv`:
- *  - 'Pagado' desde ENERO hasta mes(fecha_registro)
- *  - 'Pendiente' del resto del año
+ * Inserta cliente con todos los nuevos campos y genera estados mensuales
  */
-export const crearClienteTV = async ({ nombre, direccion, telefono, plantv_id, estado_id }) => {
-  if (!nombre || !plantv_id) {
-    throw new Error("nombre y plantv_id son requeridos");
+export const crearClienteTV = async (clienteData) => {
+  const {
+    nombre,
+    usuario,
+    direccion,
+    telefono,
+    plantv_id,
+    estado_id = 1,
+    fecha_inicio,
+    fecha_expiracion,
+    monto_cancelado = 0,
+    moneda = 'HNL',
+    creditos_otorgados = 0,
+    notas
+  } = clienteData;
+
+  if (!nombre || !usuario || !plantv_id || !fecha_inicio || !fecha_expiracion) {
+    throw new Error("nombre, usuario, plantv_id, fecha_inicio y fecha_expiracion son requeridos");
   }
 
   const pool = await connectDB();
@@ -215,44 +237,79 @@ export const crearClienteTV = async ({ nombre, direccion, telefono, plantv_id, e
     // 1) Insertar cliente
     const [res] = await conn.query(
       `
-      INSERT INTO clientestv (nombre, direccion, telefono, plantv_id, estado_id)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO clientestv (
+        nombre, usuario, direccion, telefono, plantv_id, estado_id,
+        fecha_inicio, fecha_expiracion, monto_cancelado, moneda,
+        creditos_otorgados, notas
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
-      [nombre, direccion || null, telefono || null, plantv_id, estado_id || 1]
+      [
+        nombre, usuario, direccion || null, telefono || null, plantv_id, estado_id,
+        formatFechaParaMySQL(fecha_inicio), formatFechaParaMySQL(fecha_expiracion),
+        monto_cancelado, moneda, creditos_otorgados, notas || null
+      ]
     );
 
     const clienteId = res.insertId;
 
-    // 2) Obtener fecha_registro del cliente recién insertado
-    const [filaFecha] = await conn.query(
-      `SELECT fecha_registro FROM clientestv WHERE id = ?`,
-      [clienteId]
-    );
-    const fechaRegistro = filaFecha?.[0]?.fecha_registro || new Date();
+    // 2) Obtener información del plan para calcular meses pagados
+    const plan = await obtenerPlanTVPorId(plantv_id);
+    const precioPlan = plan ? plan.precio : 0;
 
-    // 3) Generar estados del año actual
+    // 3) Calcular cuántos meses está pagando por adelantado
+    let mesesPagadosAdelantados = 0;
+    if (precioPlan > 0 && monto_cancelado >= precioPlan) {
+      mesesPagadosAdelantados = Math.floor(monto_cancelado / precioPlan);
+    }
+
+    // 4) Generar estados mensuales para el período completo + meses adelantados
+    const fechaInicio = new Date(fecha_inicio);
+    const fechaFin = new Date(fecha_expiracion);
+    
+    // Si pagó meses adelantados, extender la fecha fin para la generación de estados
+    let fechaFinEstados = new Date(fechaFin);
+    if (mesesPagadosAdelantados > 0) {
+      fechaFinEstados.setMonth(fechaFinEstados.getMonth() + mesesPagadosAdelantados);
+    }
+
+    const meses = generarMesesEntreFechas(fechaInicio, fechaFinEstados);
     const ahora = new Date();
+    const mesActual = ahora.getMonth() + 1;
     const añoActual = ahora.getFullYear();
-    const mesRegistro =
-      (fechaRegistro instanceof Date ? fechaRegistro : new Date(fechaRegistro)).getMonth() + 1;
 
-    const todosLosMeses = Array.from({ length: 12 }, (_, i) => i + 1);
-    const mesesPagados = todosLosMeses.filter((m) => m <= mesRegistro);
+    if (meses.length > 0) {
+      const placeholders = meses.map(() => "(?, ?, ?, ?)").join(", ");
+      const values = meses.flatMap(({ mes, anio }) => {
+        // Determinar el estado de cada mes
+        let estado = "Pendiente";
+        
+        // Calcular el número de mes relativo desde la fecha de inicio
+        const fechaMes = new Date(anio, mes - 1, 1);
+        const fechaInicioObj = new Date(fechaInicio.getFullYear(), fechaInicio.getMonth(), 1);
+        const diferenciaMeses = (fechaMes.getFullYear() - fechaInicioObj.getFullYear()) * 12 + 
+                               (fechaMes.getMonth() - fechaInicioObj.getMonth());
+        
+        // Si el mes está dentro de los meses pagados, marcarlo como Pagado
+        if (diferenciaMeses < mesesPagadosAdelantados) {
+          estado = "Pagado";
+        } 
+        // Si el mes está en el pasado pero dentro del período original, marcarlo como Pagado
+        else if (fechaMes < new Date(ahora.getFullYear(), ahora.getMonth(), 1) && 
+                 fechaMes >= fechaInicioObj) {
+          estado = "Pagado";
+        }
+        // Mes actual se marca según el pago
+        else if (mes === mesActual && anio === añoActual) {
+          estado = monto_cancelado >= precioPlan ? "Pagado" : "Pendiente";
+        }
+        
+        return [clienteId, mes, anio, estado];
+      });
 
-    const values = [];
-    const placeholders = [];
-
-    todosLosMeses.forEach((mes) => {
-      const estado = mesesPagados.includes(mes) ? "Pagado" : "Pendiente";
-      values.push(clienteId, mes, añoActual, estado);
-      placeholders.push("(?, ?, ?, ?)");
-    });
-
-    if (values.length > 0) {
       await conn.query(
         `
-        INSERT INTO estado_mensual_tv (cliente_id, mes, anio, estado)
-        VALUES ${placeholders.join(", ")}
+        INSERT INTO estado_mensual_tv (clientetv_id, mes, anio, estado)
+        VALUES ${placeholders}
         ON DUPLICATE KEY UPDATE estado = VALUES(estado)
         `,
         values
@@ -264,6 +321,12 @@ export const crearClienteTV = async ({ nombre, direccion, telefono, plantv_id, e
   } catch (err) {
     await conn.rollback();
     console.error("Error al crear cliente TV:", err);
+    
+    // Manejar error de usuario duplicado
+    if (err.code === 'ER_DUP_ENTRY' && err.sqlMessage.includes('usuario')) {
+      throw new Error("El nombre de usuario ya existe");
+    }
+    
     throw err;
   } finally {
     conn.release();
@@ -274,10 +337,22 @@ export const crearClienteTV = async ({ nombre, direccion, telefono, plantv_id, e
  * PUT /api/tv/clientes/:id
  * Actualización dinámica: solo campos presentes.
  */
-export const actualizarClienteTV = async (
-  id,
-  { nombre, direccion, telefono, plantv_id, estado_id }
-) => {
+export const actualizarClienteTV = async (id, campos) => {
+  const {
+    nombre,
+    usuario,
+    direccion,
+    telefono,
+    plantv_id,
+    estado_id,
+    fecha_inicio,
+    fecha_expiracion,
+    monto_cancelado,
+    moneda,
+    creditos_otorgados,
+    notas
+  } = campos;
+
   const pool = await connectDB();
   const conn = await pool.getConnection();
 
@@ -288,6 +363,10 @@ export const actualizarClienteTV = async (
     if (typeof nombre !== "undefined") {
       fields.push("nombre = ?");
       params.push(nombre);
+    }
+    if (typeof usuario !== "undefined") {
+      fields.push("usuario = ?");
+      params.push(usuario);
     }
     if (typeof direccion !== "undefined") {
       fields.push("direccion = ?");
@@ -305,26 +384,50 @@ export const actualizarClienteTV = async (
       fields.push("estado_id = ?");
       params.push(estado_id);
     }
+    if (typeof fecha_inicio !== "undefined") {
+      fields.push("fecha_inicio = ?");
+      params.push(formatFechaParaMySQL(fecha_inicio));
+    }
+    if (typeof fecha_expiracion !== "undefined") {
+      fields.push("fecha_expiracion = ?");
+      params.push(formatFechaParaMySQL(fecha_expiracion));
+    }
+    if (typeof monto_cancelado !== "undefined") {
+      fields.push("monto_cancelado = ?");
+      params.push(monto_cancelado);
+    }
+    if (typeof moneda !== "undefined") {
+      fields.push("moneda = ?");
+      params.push(moneda);
+    }
+    if (typeof creditos_otorgados !== "undefined") {
+      fields.push("creditos_otorgados = ?");
+      params.push(creditos_otorgados);
+    }
+    if (typeof notas !== "undefined") {
+      fields.push("notas = ?");
+      params.push(notas || null);
+    }
 
     if (fields.length === 0) {
-      // nada que actualizar
       return false;
     }
 
     params.push(id);
 
     const [res] = await conn.query(
-      `
-      UPDATE clientestv
-         SET ${fields.join(", ")}
-       WHERE id = ?
-      `,
+      `UPDATE clientestv SET ${fields.join(", ")} WHERE id = ?`,
       params
     );
 
     return res.affectedRows > 0;
   } catch (err) {
     console.error("Error al actualizar cliente TV:", err);
+    
+    if (err.code === 'ER_DUP_ENTRY' && err.sqlMessage.includes('usuario')) {
+      throw new Error("El nombre de usuario ya existe");
+    }
+    
     throw err;
   } finally {
     conn.release();
@@ -333,8 +436,6 @@ export const actualizarClienteTV = async (
 
 /**
  * DELETE /api/tv/clientes/:id
- * Borra primero estado_mensual_tv, luego el cliente.
- * (Los dispositivos se eliminan por ON DELETE CASCADE en dispositivos_tv)
  */
 export const eliminarClienteTV = async (id) => {
   const pool = await connectDB();
@@ -343,7 +444,7 @@ export const eliminarClienteTV = async (id) => {
   try {
     await conn.beginTransaction();
 
-    await conn.query(`DELETE FROM estado_mensual_tv WHERE cliente_id = ?`, [id]);
+    await conn.query(`DELETE FROM estado_mensual_tv WHERE clientetv_id = ?`, [id]);
     const [res] = await conn.query(`DELETE FROM clientestv WHERE id = ?`, [id]);
 
     await conn.commit();
@@ -358,52 +459,52 @@ export const eliminarClienteTV = async (id) => {
 };
 
 /**
- * MIGRACIÓN (ejecutar una sola vez):
- * Crea estados en estado_mensual_tv para clientes existentes,
- * generando meses desde fecha_registro hasta hoy como 'Pendiente'
- * si aún no existen.
+ * GET /api/tv/clientes/usuario/:usuario
+ * Buscar cliente por nombre de usuario
  */
-export const migrarClientesExistentesTV = async () => {
-  const pool = await connectDB();
-  const conn = await pool.getConnection();
+export const obtenerClienteTVPorUsuario = async (usuario) => {
+  const conn = await connectDB();
+  const [rows] = await conn.query(
+    `
+    SELECT 
+      c.*,
+      p.nombre AS plan_nombre,
+      p.precio_mensual AS plan_precio_mensual,
+      e.descripcion AS estado_nombre
+    FROM clientestv c
+    INNER JOIN planestv p ON p.id = c.plantv_id
+    INNER JOIN estadosClientes e ON e.id = c.estado_id
+    WHERE c.usuario = ?
+    `,
+    [usuario]
+  );
+  return rows[0] || null;
+};
 
-  try {
-    await conn.beginTransaction();
-
-    // Traer todos los clientes con su fecha_registro
-    const [clientes] = await conn.query(
-      `SELECT id, fecha_registro FROM clientestv`
-    );
-
-    for (const c of clientes) {
-      const fechaInicio = new Date(c.fecha_registro);
-      const fechaActual = new Date();
-      const meses = generarMesesEntreFechas(fechaInicio, fechaActual);
-
-      if (meses.length > 0) {
-        const placeholders = meses.map(() => "(?, ?, ?, ?)").join(", ");
-        const values = meses.flatMap(({ mes, anio }) => [c.id, mes, anio, "Pendiente"]);
-
-        // INSERT IGNORE para no duplicar combinaciones (cliente_id, mes, anio)
-        await conn.query(
-          `
-          INSERT IGNORE INTO estado_mensual_tv (cliente_id, mes, anio, estado)
-          VALUES ${placeholders}
-          `,
-          values
-        );
-      }
-    }
-
-    await conn.commit();
-    return { clientesProcesados: clientes.length };
-  } catch (err) {
-    await conn.rollback();
-    console.error("Error en migrarClientesExistentesTV:", err);
-    throw err;
-  } finally {
-    conn.release();
-  }
+/**
+ * GET /api/tv/clientes/vencimientos/proximos
+ * Clientes que expiran en los próximos 7 días
+ */
+export const obtenerClientesProximosAVencer = async (dias = 7) => {
+  const conn = await connectDB();
+  const [rows] = await conn.query(
+    `
+    SELECT 
+      c.id,
+      c.nombre,
+      c.usuario,
+      c.fecha_expiracion,
+      p.nombre AS plan_nombre,
+      DATEDIFF(c.fecha_expiracion, CURDATE()) AS dias_restantes
+    FROM clientestv c
+    INNER JOIN planestv p ON p.id = c.plantv_id
+    WHERE c.fecha_expiracion BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL ? DAY)
+    AND c.estado_id = 1  -- Solo clientes activos
+    ORDER BY c.fecha_expiracion ASC
+    `,
+    [dias]
+  );
+  return rows;
 };
 
 /** =================================
@@ -459,7 +560,7 @@ export const eliminarDispositivoTV = async (id) => {
   return res.affectedRows > 0;
 };
 
-/** Helper: buscar dispositivo por MAC (opcional) */
+/** Helper: buscar dispositivo por MAC */
 export const obtenerDispositivoPorMAC = async (mac_address) => {
   const conn = await connectDB();
   const [rows] = await conn.query(
