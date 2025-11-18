@@ -206,7 +206,8 @@ export const obtenerClienteTVPorId = async (id) => {
 
 /**
  * POST /api/tv/clientes
- * Inserta cliente con todos los nuevos campos y genera estados mensuales
+ * Inserta cliente con todos los nuevos campos, genera estados mensuales
+ * y registra el pago inicial en pagostv.
  */
 export const crearClienteTV = async (clienteData) => {
   const {
@@ -228,12 +229,48 @@ export const crearClienteTV = async (clienteData) => {
     throw new Error("nombre, usuario, plantv_id, fecha_inicio y fecha_expiracion son requeridos");
   }
 
+  // ✅ Función CORREGIDA - Mantener la fecha exacta del input
+  const toLocalDate = (value) => {
+    if (!value) return null;
+
+    if (value instanceof Date) {
+      return new Date(value);
+    }
+
+    if (typeof value === 'string') {
+      // Si viene en formato YYYY-MM-DD, crear la fecha directamente
+      if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+        const [year, month, day] = value.split('-').map(Number);
+        return new Date(year, month - 1, day);
+      }
+
+      // Para otros formatos, usar el parser de Date
+      const d = new Date(value);
+      if (isNaN(d.getTime())) {
+        throw new Error(`Fecha inválida: ${value}`);
+      }
+      return d;
+    }
+
+    throw new Error(`Tipo de fecha no soportado: ${typeof value}`);
+  };
+
+  // ✅ Formatea fecha a 'YYYY-MM-DD' SIN modificar la fecha
+  const formatFechaCorregida = (fecha) => {
+    if (!fecha) return null;
+    const date = toLocalDate(fecha);
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+
   const pool = await connectDB();
   const conn = await pool.getConnection();
 
   try {
     await conn.beginTransaction();
-
+    
     // 1) Insertar cliente
     const [res] = await conn.query(
       `
@@ -244,65 +281,98 @@ export const crearClienteTV = async (clienteData) => {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       [
-        nombre, usuario, direccion || null, telefono || null, plantv_id, estado_id,
-        formatFechaParaMySQL(fecha_inicio), formatFechaParaMySQL(fecha_expiracion),
-        monto_cancelado, moneda, creditos_otorgados, notas || null
+        nombre,
+        usuario,
+        direccion || null,
+        telefono || null,
+        plantv_id,
+        estado_id,
+        formatFechaCorregida(fecha_inicio),
+        formatFechaCorregida(fecha_expiracion),
+        monto_cancelado,
+        moneda,
+        creditos_otorgados,
+        notas || null
       ]
     );
 
     const clienteId = res.insertId;
 
-    // 2) Obtener información del plan para calcular meses pagados
+    // 2) Registrar pago inicial en pagostv (si hay monto)
+    if (monto_cancelado > 0) {
+      const fechaPagoHoy = formatFechaCorregida(new Date());
+
+      await conn.query(
+        `
+        INSERT INTO pagostv (clientetv_id, monto, fecha_pago, observacion)
+        VALUES (?, ?, ?, ?)
+        `,
+        [
+          clienteId,
+          monto_cancelado,
+          fechaPagoHoy,
+          `Pago inicial al crear cliente (moneda: ${moneda})`
+        ]
+      );
+    }
+
+    // 3) Obtener información del plan
     const plan = await obtenerPlanTVPorId(plantv_id);
     const precioPlan = plan ? plan.precio : 0;
 
-    // 3) Calcular cuántos meses está pagando por adelantado
-    let mesesPagadosAdelantados = 0;
-    if (precioPlan > 0 && monto_cancelado >= precioPlan) {
-      mesesPagadosAdelantados = Math.floor(monto_cancelado / precioPlan);
+    // 4) Calcular meses pagados por adelantado (EXCLUSIVAMENTE adicionales)
+    let mesesAdicionalesAdelantados = 0;
+    if (precioPlan > 0 && monto_cancelado > precioPlan) {
+      mesesAdicionalesAdelantados = Math.floor((monto_cancelado - precioPlan) / precioPlan);
     }
 
-    // 4) Generar estados mensuales para el período completo + meses adelantados
-    const fechaInicio = new Date(fecha_inicio);
-    const fechaFin = new Date(fecha_expiracion);
-    
-    // Si pagó meses adelantados, extender la fecha fin para la generación de estados
-    let fechaFinEstados = new Date(fechaFin);
-    if (mesesPagadosAdelantados > 0) {
-      fechaFinEstados.setMonth(fechaFinEstados.getMonth() + mesesPagadosAdelantados);
+    // 5) Generar estados mensuales
+    const fechaInicioDate = toLocalDate(fecha_inicio);
+    const fechaFinOriginal = toLocalDate(fecha_expiracion);
+
+    let fechaFinEstados = new Date(fechaFinOriginal);
+
+    if (mesesAdicionalesAdelantados > 0) {
+      fechaFinEstados.setMonth(fechaFinEstados.getMonth() + mesesAdicionalesAdelantados);
     }
 
-    const meses = generarMesesEntreFechas(fechaInicio, fechaFinEstados);
-    const ahora = new Date();
-    const mesActual = ahora.getMonth() + 1;
-    const añoActual = ahora.getFullYear();
+    const añoActual = new Date().getFullYear();
+    const fechaInicioGeneracion = new Date(añoActual, 0, 1); // 1 de Enero
+
+    const meses = generarMesesEntreFechas(fechaInicioGeneracion, fechaFinEstados);
 
     if (meses.length > 0) {
       const placeholders = meses.map(() => "(?, ?, ?, ?)").join(", ");
       const values = meses.flatMap(({ mes, anio }) => {
-        // Determinar el estado de cada mes
-        let estado = "Pendiente";
-        
-        // Calcular el número de mes relativo desde la fecha de inicio
         const fechaMes = new Date(anio, mes - 1, 1);
-        const fechaInicioObj = new Date(fechaInicio.getFullYear(), fechaInicio.getMonth(), 1);
-        const diferenciaMeses = (fechaMes.getFullYear() - fechaInicioObj.getFullYear()) * 12 + 
-                               (fechaMes.getMonth() - fechaInicioObj.getMonth());
-        
-        // Si el mes está dentro de los meses pagados, marcarlo como Pagado
-        if (diferenciaMeses < mesesPagadosAdelantados) {
+        const fechaFinMes = new Date(anio, mes, 0);
+        const fechaInicioMes = new Date(
+          fechaInicioDate.getFullYear(),
+          fechaInicioDate.getMonth(),
+          1
+        );
+
+        let estado = "Pendiente";
+
+        if (fechaFinMes < fechaInicioMes) {
+          estado = "Sin dato";
+        } else if (fechaMes >= fechaInicioMes && fechaFinMes <= fechaFinOriginal) {
           estado = "Pagado";
-        } 
-        // Si el mes está en el pasado pero dentro del período original, marcarlo como Pagado
-        else if (fechaMes < new Date(ahora.getFullYear(), ahora.getMonth(), 1) && 
-                 fechaMes >= fechaInicioObj) {
-          estado = "Pagado";
+        } else if (mesesAdicionalesAdelantados > 0) {
+          const fechaFinOriginalMes = new Date(
+            fechaFinOriginal.getFullYear(),
+            fechaFinOriginal.getMonth(),
+            1
+          );
+          const mesesDesdeFinOriginal =
+            (fechaMes.getFullYear() - fechaFinOriginalMes.getFullYear()) * 12 +
+            (fechaMes.getMonth() - fechaFinOriginalMes.getMonth());
+
+          if (mesesDesdeFinOriginal > 0 && mesesDesdeFinOriginal <= mesesAdicionalesAdelantados) {
+            estado = "Pagado";
+          }
         }
-        // Mes actual se marca según el pago
-        else if (mes === mesActual && anio === añoActual) {
-          estado = monto_cancelado >= precioPlan ? "Pagado" : "Pendiente";
-        }
-        
+
         return [clienteId, mes, anio, estado];
       });
 
@@ -321,12 +391,11 @@ export const crearClienteTV = async (clienteData) => {
   } catch (err) {
     await conn.rollback();
     console.error("Error al crear cliente TV:", err);
-    
-    // Manejar error de usuario duplicado
-    if (err.code === 'ER_DUP_ENTRY' && err.sqlMessage.includes('usuario')) {
+
+    if (err.code === 'ER_DUP_ENTRY' && err.sqlMessage?.includes('usuario')) {
       throw new Error("El nombre de usuario ya existe");
     }
-    
+
     throw err;
   } finally {
     conn.release();
@@ -386,11 +455,13 @@ export const actualizarClienteTV = async (id, campos) => {
     }
     if (typeof fecha_inicio !== "undefined") {
       fields.push("fecha_inicio = ?");
-      params.push(formatFechaParaMySQL(fecha_inicio));
+      // ELIMINAR formatFechaParaMySQL() - usar la fecha directamente
+      params.push(fecha_inicio);
     }
     if (typeof fecha_expiracion !== "undefined") {
       fields.push("fecha_expiracion = ?");
-      params.push(formatFechaParaMySQL(fecha_expiracion));
+      // ELIMINAR formatFechaParaMySQL() - usar la fecha directamente
+      params.push(fecha_expiracion);
     }
     if (typeof monto_cancelado !== "undefined") {
       fields.push("monto_cancelado = ?");
