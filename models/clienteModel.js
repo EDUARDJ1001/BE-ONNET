@@ -11,28 +11,28 @@ const generarMesesEntreFechas = (fechaInicio, fechaFin) => {
   const meses = [];
   const inicio = new Date(fechaInicio);
   const fin = new Date(fechaFin);
-  
+
   // Asegurarnos de que las fechas sean válidas
   if (isNaN(inicio.getTime()) || isNaN(fin.getTime())) {
     return meses;
   }
-  
+
   // Establecer el día a 1 para comparar solo mes y año
   inicio.setDate(1);
   fin.setDate(1);
-  
+
   let current = new Date(inicio);
-  
+
   while (current <= fin) {
     meses.push({
       mes: current.getMonth() + 1,
       anio: current.getFullYear()
     });
-    
+
     // Avanzar al siguiente mes
     current.setMonth(current.getMonth() + 1);
   }
-  
+
   return meses;
 };
 
@@ -40,7 +40,7 @@ export const obtenerClientes = async () => {
   const db = await connectDB();
   const [rows] = await db.execute(`
     SELECT 
-      c.id, c.nombre, c.ip, c.direccion, c.telefono, c.pass_onu, c.coordenadas,
+      c.id, c.nombre, c.ip, c.direccion, c.telefono, c.vineta, c.pass_onu, c.coordenadas,
       c.plan_id, c.estado_id, c.dia_pago, c.fecha_instalacion,
       p.nombre AS plan_nombre, p.precio_mensual,
       ec.descripcion AS nombreEstado
@@ -56,7 +56,7 @@ export const obtenerClientePorId = async (id) => {
   const db = await connectDB();
   const [rows] = await db.execute(`
     SELECT 
-      c.id, c.nombre, c.ip, c.direccion, c.telefono, c.pass_onu, c.coordenadas,
+      c.id, c.nombre, c.ip, c.direccion, c.telefono, c.vineta, c.pass_onu, c.coordenadas,
       c.plan_id, c.dia_pago, c.estado_id, c.fecha_instalacion,
       p.nombre AS plan_nombre, p.precio_mensual,
       ec.descripcion AS nombreEstado
@@ -69,7 +69,7 @@ export const obtenerClientePorId = async (id) => {
 };
 
 export const crearCliente = async (cliente) => { 
-  const { nombre, ip, direccion, coordenadas, telefono, pass_onu, plan_id, dia_pago, fecha_instalacion } = cliente;
+  const { nombre, ip, direccion, coordenadas, telefono, vineta, pass_onu, plan_id, dia_pago, fecha_instalacion } = cliente;
   const db = await connectDB();
   const conn = await db.getConnection();
 
@@ -78,23 +78,25 @@ export const crearCliente = async (cliente) => {
 
     // 1) Validar y formatear fecha de instalación
     const fechaInstalacionFormateada = formatFechaParaMySQL(fecha_instalacion) || formatFechaParaMySQL(new Date());
-    
+
     // 2) Convertir undefined a null para MySQL
     const coordenadasValue = coordenadas !== undefined ? coordenadas : null;
     const diaPagoValue = dia_pago !== undefined ? dia_pago : null;
-    
+    const vinetaValue = vineta !== undefined ? vineta : null;
+
     // 3) Insertar cliente con estado_id = 1 (Activo)
     const [resCliente] = await conn.execute(`
-      INSERT INTO clientes (nombre, ip, direccion, coordenadas, telefono, pass_onu, plan_id, dia_pago, estado_id, fecha_instalacion)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+      INSERT INTO clientes (nombre, ip, direccion, coordenadas, telefono, vineta, pass_onu, plan_id, dia_pago, estado_id, fecha_instalacion)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
     `, [
-      nombre, 
-      ip, 
-      direccion, 
+      nombre,
+      ip,
+      direccion,
       coordenadasValue,
-      telefono, 
-      pass_onu, 
-      plan_id, 
+      telefono,
+      vinetaValue,
+      pass_onu,
+      plan_id,
       diaPagoValue,
       fechaInstalacionFormateada
     ]);
@@ -105,17 +107,16 @@ export const crearCliente = async (cliente) => {
     const fechaInstalacion = new Date(fechaInstalacionFormateada);
     const ahora = new Date();
     const añoActual = ahora.getFullYear();
-    const mesActual = ahora.getMonth() + 1; // Mes actual (1-12)
-    
+
     // Generar todos los meses del año actual (1 al 12)
     const todosLosMeses = Array.from({ length: 12 }, (_, i) => i + 1);
-    
+
     // Determinar qué meses deben estar como "Pagado"
     const mesInstalacion = fechaInstalacion.getMonth() + 1; // Mes de instalación (1-12)
     const añoInstalacion = fechaInstalacion.getFullYear();
-    
+
     let mesesPagados = [];
-    
+
     if (añoInstalacion === añoActual) {
       // Todos los meses desde ENERO hasta el mes de instalación (incluyendo)
       mesesPagados = todosLosMeses.filter(mes => mes <= mesInstalacion);
@@ -128,7 +129,7 @@ export const crearCliente = async (cliente) => {
     // Preparar los valores para la inserción
     const values = [];
     const placeholders = [];
-    
+
     todosLosMeses.forEach(mes => {
       const estado = mesesPagados.includes(mes) ? 'Pagado' : 'Pendiente';
       values.push(clienteId, mes, añoActual, estado);
@@ -155,12 +156,31 @@ export const crearCliente = async (cliente) => {
 
 // Actualizar cliente (si viene estado_id lo actualiza; si no, lo deja igual)
 export const actualizarCliente = async (id, cliente) => {
-  const { nombre, ip, direccion, coordenadas, telefono, pass_onu, plan_id, estado_id, dia_pago, fecha_instalacion } = cliente;
+  const { nombre, ip, direccion, coordenadas, telefono, vineta, pass_onu, plan_id, estado_id, dia_pago, fecha_instalacion } = cliente;
   const db = await connectDB();
 
   // Construimos SQL dinámico para no obligar a enviar todos los campos siempre
-  const fields = ['nombre = ?', 'ip = ?', 'direccion = ?', 'coordenadas = ?', 'telefono = ?', 'pass_onu = ?', 'plan_id = ?'];
-  const params = [nombre, ip, direccion, coordenadas || null, telefono, pass_onu, plan_id];
+  const fields = [
+    'nombre = ?',
+    'ip = ?',
+    'direccion = ?',
+    'coordenadas = ?',
+    'telefono = ?',
+    'vineta = ?',
+    'pass_onu = ?',
+    'plan_id = ?'
+  ];
+
+  const params = [
+    nombre,
+    ip,
+    direccion,
+    coordenadas || null,
+    telefono,
+    vineta !== undefined ? vineta : null,
+    pass_onu,
+    plan_id
+  ];
 
   if (typeof estado_id !== 'undefined') {
     fields.push('estado_id = ?');
@@ -169,7 +189,7 @@ export const actualizarCliente = async (id, cliente) => {
 
   if (typeof dia_pago !== 'undefined') {
     fields.push('dia_pago = ?');
-    params.push(dia_pago || null); // Convertir a null si es undefined
+    params.push(dia_pago || null);
   }
 
   if (fecha_instalacion) {
@@ -193,26 +213,25 @@ export const actualizarCliente = async (id, cliente) => {
 // Función auxiliar para formatear fechas para MySQL
 export const formatFechaParaMySQL = (fecha) => {
   if (!fecha) return null;
-  
+
   try {
     const dateObj = new Date(fecha);
-    
+
     // Si la fecha es inválida
     if (isNaN(dateObj.getTime())) {
       return new Date().toISOString().split('T')[0];
     }
-    
+
     // Compensar el timezone offset para mantener la fecha local
     const offset = dateObj.getTimezoneOffset();
     const localDate = new Date(dateObj.getTime() - (offset * 60 * 1000));
-    
+
     return localDate.toISOString().split('T')[0];
   } catch (error) {
     console.error('Error formateando fecha:', error);
     return new Date().toISOString().split('T')[0];
   }
 };
-
 
 // Función para migrar clientes existentes (ejecutar una sola vez)
 export const migrarClientesExistentes = async () => {
@@ -246,15 +265,15 @@ export const migrarClientesExistentes = async () => {
     for (const cliente of clientesCompletos) {
       const fechaInicio = new Date(cliente.fecha_instalacion);
       const fechaActual = new Date();
-      
+
       const meses = generarMesesEntreFechas(fechaInicio, fechaActual);
-      
+
       if (meses.length > 0) {
         const placeholders = meses.map(() => '(?, ?, ?, ?)').join(', ');
-        const values = meses.flatMap(({ mes, anio }) => 
+        const values = meses.flatMap(({ mes, anio }) =>
           [cliente.id, mes, anio, 'Pendiente']
         );
-        
+
         await conn.execute(`
           INSERT IGNORE INTO estado_mensual (cliente_id, mes, anio, estado)
           VALUES ${placeholders}

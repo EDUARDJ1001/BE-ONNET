@@ -1,4 +1,5 @@
 import * as ClienteModel from '../models/clienteModel.js';
+import connectDB from '../config/db.js';
 
 export const getClientes = async (req, res) => {
   try {
@@ -33,12 +34,23 @@ export const getClientesConEstados = async (req, res) => {
 
 export const createCliente = async (req, res) => {
   try {
-    const { nombre, ip, direccion, coordenadas, telefono, pass_onu, plan_id, dia_pago, fecha_instalacion } = req.body;
-    
+    const {
+      nombre,
+      ip,
+      direccion,
+      coordenadas,
+      telefono,
+      vineta,
+      pass_onu,
+      plan_id,
+      dia_pago,
+      fecha_instalacion
+    } = req.body;
+
     // Validaciones básicas
     if (!nombre || !ip || !direccion || !telefono || !pass_onu || !plan_id) {
-      return res.status(400).json({ 
-        message: 'nombre, ip, direccion, telefono, pass_onu y plan_id son requeridos.' 
+      return res.status(400).json({
+        message: 'nombre, ip, direccion, telefono, pass_onu y plan_id son requeridos.'
       });
     }
 
@@ -48,6 +60,7 @@ export const createCliente = async (req, res) => {
       direccion,
       coordenadas: coordenadas || null,
       telefono,
+      vineta: vineta || null,
       pass_onu,
       plan_id,
       dia_pago,
@@ -55,37 +68,50 @@ export const createCliente = async (req, res) => {
     };
 
     const nuevoId = await ClienteModel.crearCliente(clienteData);
-    res.status(201).json({ 
-      message: 'Cliente creado exitosamente', 
-      id: nuevoId 
+
+    res.status(201).json({
+      message: 'Cliente creado exitosamente',
+      id: nuevoId
     });
   } catch (error) {
     console.error('Error al crear cliente:', error);
-    
+
     if (error.code === 'ER_DUP_ENTRY') {
       return res.status(400).json({ message: 'El cliente ya existe' });
     }
-    
+
     res.status(500).json({ message: 'Error del servidor' });
   }
 };
 
 export const updateCliente = async (req, res) => {
   try {
-    const { nombre, ip, direccion, coordenadas, telefono, pass_onu, plan_id, dia_pago, estado_id, fecha_instalacion } = req.body;
-    
+    const {
+      nombre,
+      ip,
+      direccion,
+      coordenadas,
+      telefono,
+      vineta,
+      pass_onu,
+      plan_id,
+      dia_pago,
+      estado_id,
+      fecha_instalacion
+    } = req.body;
+
     // Validaciones básicas
     if (!nombre || !direccion || !telefono || !pass_onu || !plan_id) {
-      return res.status(400).json({ 
-        message: 'nombre, direccion, telefono, pass_onu y plan_id son requeridos.' 
+      return res.status(400).json({
+        message: 'nombre, direccion, telefono, pass_onu y plan_id son requeridos.'
       });
     }
 
-    // Formatear fecha para MySQL (solo YYYY-MM-DD)
+    // Formatear fecha para MySQL (YYYY-MM-DD)
     const formatFecha = (fecha) => {
       if (!fecha) return undefined;
       if (typeof fecha === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
-        return fecha; // Ya está en formato correcto
+        return fecha;
       }
       const date = new Date(fecha);
       if (isNaN(date.getTime())) return undefined;
@@ -98,6 +124,7 @@ export const updateCliente = async (req, res) => {
       direccion,
       coordenadas: coordenadas || null,
       telefono,
+      vineta: vineta !== undefined ? vineta : null,
       pass_onu,
       plan_id,
       dia_pago,
@@ -106,14 +133,15 @@ export const updateCliente = async (req, res) => {
     };
 
     await ClienteModel.actualizarCliente(req.params.id, clienteData);
+
     res.json({ message: 'Cliente actualizado exitosamente' });
   } catch (error) {
     console.error('Error al actualizar cliente:', error);
-    
+
     if (error.message === 'Cliente no encontrado') {
       return res.status(404).json({ message: error.message });
     }
-    
+
     res.status(500).json({ message: 'Error del servidor' });
   }
 };
@@ -124,11 +152,11 @@ export const deleteCliente = async (req, res) => {
     res.json({ message: 'Cliente eliminado exitosamente' });
   } catch (error) {
     console.error('Error al eliminar cliente:', error);
-    
+
     if (error.message === 'Cliente no encontrado') {
       return res.status(404).json({ message: error.message });
     }
-    
+
     res.status(500).json({ message: 'Error del servidor' });
   }
 };
@@ -148,7 +176,7 @@ export const getEstadosClientes = async (req, res) => {
 export const migrarClientes = async (req, res) => {
   try {
     const resultado = await ClienteModel.migrarClientesExistentes();
-    res.json({ 
+    res.json({
       message: 'Migración completada exitosamente',
       clientesMigrados: resultado.clientesMigrados
     });

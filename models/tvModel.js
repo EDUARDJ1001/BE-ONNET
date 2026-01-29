@@ -255,7 +255,7 @@ export const crearClienteTV = async (clienteData) => {
     throw new Error(`Tipo de fecha no soportado: ${typeof value}`);
   };
 
-  // ✅ Formatea fecha a 'YYYY-MM-DD' SIN modificar la fecha
+  // Formatea fecha a 'YYYY-MM-DD' SIN modificar la fecha
   const formatFechaCorregida = (fecha) => {
     if (!fecha) return null;
     const date = toLocalDate(fecha);
@@ -267,7 +267,7 @@ export const crearClienteTV = async (clienteData) => {
 
   const pool = await connectDB();
   const conn = await pool.getConnection();
-
+89
   try {
     await conn.beginTransaction();
     
