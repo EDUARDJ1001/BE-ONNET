@@ -22,7 +22,8 @@ const connectDB = async () => {
                 idleTimeout: 30000,
                 waitForConnections: true,
                 enableKeepAlive: true,
-                keepAliveInitialDelay: 0
+                keepAliveInitialDelay: 0,
+                dateStrings: true
             });
 
             // Test de conexión

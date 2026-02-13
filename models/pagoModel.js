@@ -5,36 +5,75 @@ import connectDB from '../config/db.js';
    Utilidades de fecha / validación
    ============================ */
 
+// Normaliza fecha a 'YYYY-MM-DD' (sin zona horaria, sin horas)
+const normalizarFechaPagoYYYYMMDD = (fecha) => {
+  if (!fecha) throw new Error('fecha_pago requerida');
+
+  // Si ya viene 'YYYY-MM-DD'
+  if (typeof fecha === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+    return fecha;
+  }
+
+  // Si viene ISO completo: 'YYYY-MM-DDTHH:mm:ss...'
+  if (typeof fecha === 'string') {
+    const match = fecha.match(/^(\d{4}-\d{2}-\d{2})/);
+    if (match) return match[1];
+  }
+
+  // Si viene Date
+  if (fecha instanceof Date && !Number.isNaN(fecha.getTime())) {
+    const y = fecha.getFullYear();
+    const m = String(fecha.getMonth() + 1).padStart(2, '0');
+    const d = String(fecha.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  throw new Error('fecha_pago inválida');
+};
+
+// Extrae mes/año desde 'YYYY-MM-DD' sin usar Date()
+const mesAnioDesdeYYYYMMDD = (yyyy_mm_dd) => {
+  const m = typeof yyyy_mm_dd === 'string' ? yyyy_mm_dd.match(/^(\d{4})-(\d{2})-(\d{2})$/) : null;
+  if (!m) throw new Error('fecha_pago inválida');
+
+  const anio = parseInt(m[1], 10);
+  const mes = parseInt(m[2], 10);
+
+  if (!Number.isInteger(mes) || mes < 1 || mes > 12) throw new Error('fecha_pago inválida');
+  if (!Number.isInteger(anio) || anio < 2000 || anio > 2100) throw new Error('fecha_pago inválida');
+
+  return { mes, anio };
+};
+
 // Determinar a qué mes aplica el pago (si no se especifica, usa la fecha de pago)
 const determinarMesAplicado = (fechaPago, mesPagoEspecifico = null, anioPagoEspecifico = null) => {
-  const toInt = v => (v === null || v === undefined || v === '' ? null : parseInt(v, 10));
+  const toInt = (v) => (v === null || v === undefined || v === '' ? null : parseInt(v, 10));
   const m = toInt(mesPagoEspecifico);
   const y = toInt(anioPagoEspecifico);
 
   if (m && y) return { mes: m, anio: y };
 
-  const d = new Date(fechaPago);
-  if (Number.isNaN(d.getTime())) throw new Error('fecha_pago inválida');
-  return { mes: d.getUTCMonth() + 1, anio: d.getUTCFullYear() };
+  const fechaYYYYMMDD = normalizarFechaPagoYYYYMMDD(fechaPago);
+  return mesAnioDesdeYYYYMMDD(fechaYYYYMMDD);
 };
 
-// Validar que el mes aplicado no sea futuro
+// Validar que el mes aplicado no sea futuro (comparación por mes/año local, sin UTC)
 const validarMesAplicado = (mes, anio, { permitirFuturos = false, maxMesesFuturo = 60 } = {}) => {
   if (!Number.isInteger(mes) || mes < 1 || mes > 12) return false;
   if (!Number.isInteger(anio) || anio < 2000 || anio > 2100) return false;
 
   const now = new Date();
-  const currentUTC = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  const appliedUTC = new Date(Date.UTC(anio, mes - 1, 1));
+  const current = new Date(now.getFullYear(), now.getMonth(), 1);
+  const applied = new Date(anio, mes - 1, 1);
 
-  if (!permitirFuturos) return appliedUTC <= currentUTC;
+  if (!permitirFuturos) return applied <= current;
 
-  const maxUTC = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + maxMesesFuturo, 1));
-  return appliedUTC <= maxUTC;
+  const max = new Date(now.getFullYear(), now.getMonth() + maxMesesFuturo, 1);
+  return applied <= max;
 };
 
 /* ============================
-   Helpers de negocio (nuevo)
+   Helpers de negocio
    ============================ */
 
 // Lee suspensión desde estado_mensual.
@@ -60,7 +99,7 @@ const estaClienteSuspendidoEnPeriodo = async (conn, cliente_id, mes, anio, { usa
       LIMIT 1`,
     [cliente_id, anio, anio, mes]
   );
-  return (previo?.estado === 'Suspendido');
+  return previo?.estado === 'Suspendido';
 };
 
 const buscarUltimoMesPendienteNoSuspendido = async (conn, cliente_id) => {
@@ -84,13 +123,13 @@ const buscarUltimoMesPendienteNoSuspendido = async (conn, cliente_id) => {
             ) AS total_pagado
        FROM estado_mensual em
       WHERE em.cliente_id = ?
-        AND (em.anio < YEAR(UTC_DATE()) OR (em.anio = YEAR(UTC_DATE()) AND em.mes <= MONTH(UTC_DATE())))
+        AND (em.anio < YEAR(CURDATE()) OR (em.anio = YEAR(CURDATE()) AND em.mes <= MONTH(CURDATE())))
       ORDER BY em.anio DESC, em.mes DESC`,
     [cliente_id]
   );
 
   for (const r of rows) {
-    if (r.estado === 'Suspendido') continue; // saltar suspendidos
+    if (r.estado === 'Suspendido') continue;
     const total = Number(r.total_pagado || 0);
     const completo = precioMensual > 0 ? total >= precioMensual : total > 0;
     if (!completo) return { mes: r.mes, anio: r.anio };
@@ -107,56 +146,35 @@ const obtenerEstadoMensualFila = async (conn, cliente_id, mes, anio) => {
   return row || null;
 };
 
-// Devuelve el último mes (más reciente) pendiente NO suspendido hasta el mes actual
-const getUltimoMesPendienteNoSuspendido = async (conn, cliente_id) => {
-  const hoy = new Date();
-  const y = hoy.getFullYear();
-  const m = hoy.getMonth() + 1;
-
-  const [rows] = await conn.execute(
-    `SELECT em.mes, em.anio, em.estado
-       FROM estado_mensual em
-      WHERE em.cliente_id = ?
-        AND (em.anio < ? OR (em.anio = ? AND em.mes <= ?))
-        AND em.estado NOT IN ('Pagado', 'Suspendido')
-      ORDER BY em.anio DESC, em.mes DESC
-      LIMIT 1`,
-    [cliente_id, y, y, m]
-  );
-
-  return rows[0] ? { mes: rows[0].mes, anio: rows[0].anio } : null;
-};
-
 // Resuelve mes/año final aplicando política de suspensión y futuros
 const resolverMesAplicadoConPolitica = async (conn, cliente_id, fecha_pago, mes_expl, anio_expl) => {
+  // Normaliza fecha antes de todo (blindaje)
+  const fechaNorm = normalizarFechaPagoYYYYMMDD(fecha_pago);
+
   // 1) Punto de partida (explícito o derivado de fecha_pago)
-  let { mes, anio } = determinarMesAplicado(fecha_pago, mes_expl, anio_expl);
+  let { mes, anio } = determinarMesAplicado(fechaNorm, mes_expl, anio_expl);
 
   const esExplicito = Number.isInteger(mes_expl) && Number.isInteger(anio_expl);
   const okRango = validarMesAplicado(mes, anio, { permitirFuturos: esExplicito, maxMesesFuturo: 60 });
   if (!okRango) throw new Error('Mes/año aplicado inválido o fuera de rango permitido');
 
   // 2) Política:
-  //   - Si viene explícito: se respeta (aunque esté suspendido) -> permite pago para normalizar estado.
-  //   - Si NO es explícito y el periodo está suspendido: se reasigna al último mes pendiente no suspendido (≤ hoy).
+  // - Si viene explícito: se respeta (aunque esté suspendido) -> permite pago para normalizar estado.
+  // - Si NO es explícito y el periodo está suspendido: reasigna al último mes pendiente no suspendido (≤ hoy).
   if (!esExplicito) {
     const suspendido = await estaClienteSuspendidoEnPeriodo(conn, cliente_id, mes, anio, { usarFallback: true });
     if (suspendido) {
       const ultimo = await buscarUltimoMesPendienteNoSuspendido(conn, cliente_id);
       if (!ultimo) {
-        // No hay dónde aplicarlo sin suspensión
         throw new Error('El cliente está suspendido y no hay meses pendientes no suspendidos para aplicar el pago');
       }
-      // reasignación
       mes = ultimo.mes;
       anio = ultimo.anio;
     }
   }
 
-  // 3) Resultado final
-  return { mes, anio };
+  return { mes, anio, fechaNorm };
 };
-
 
 /* ============================
    Cálculo / Upsert de estado mensual
@@ -170,12 +188,10 @@ const calcularEstadoMensual = async (conn, cliente_id, mes, anio) => {
       WHERE c.id = ?`,
     [cliente_id]
   );
-  if (!cli) {
-    throw new Error(`Cliente ${cliente_id} sin plan asociado`);
-  }
+  if (!cli) throw new Error(`Cliente ${cliente_id} sin plan asociado`);
+
   const precioMensual = Number(cli.precio_mensual ?? 0);
 
-  // Acumulado del mes específico
   const [[sumRow]] = await conn.execute(
     `SELECT COALESCE(SUM(monto),0) as total
        FROM pagos
@@ -186,7 +202,6 @@ const calcularEstadoMensual = async (conn, cliente_id, mes, anio) => {
   );
   const acumulado = Number(sumRow.total);
 
-  // Determinar estado
   let estado = 'Pendiente';
   if (precioMensual > 0) {
     if (acumulado >= precioMensual) estado = 'Pagado';
@@ -211,7 +226,6 @@ const upsertEstadoMensual = async (conn, cliente_id, mes, anio, estado) => {
    Queries de lectura
    ============================ */
 
-// Obtener todos los pagos
 export const obtenerPagos = async () => {
   const db = await connectDB();
   const [rows] = await db.execute(`
@@ -225,17 +239,16 @@ export const obtenerPagos = async () => {
   return rows;
 };
 
-// Obtener métodos de pago
 export const obtenerMetodosPago = async () => {
   const db = await connectDB();
   const [rows] = await db.execute('SELECT * FROM metodos_pago ORDER BY descripcion');
   return rows;
 };
 
-// Obtener pago por ID
 export const obtenerPagoPorId = async (id) => {
   const db = await connectDB();
-  const [rows] = await db.execute(`
+  const [rows] = await db.execute(
+    `
     SELECT p.*, mp.descripcion as metodo_pago_desc,
            c.nombre as cliente_nombre,
            c.plan_id, pl.nombre as plan_nombre
@@ -244,27 +257,31 @@ export const obtenerPagoPorId = async (id) => {
  LEFT JOIN clientes c      ON p.cliente_id = c.id
  LEFT JOIN planes pl       ON c.plan_id = pl.id
      WHERE p.id = ?
-  `, [id]);
+  `,
+    [id]
+  );
   return rows[0];
 };
 
-// Obtener pagos por cliente
 export const obtenerPagosPorCliente = async (cliente_id) => {
   const db = await connectDB();
-  const [rows] = await db.execute(`
+  const [rows] = await db.execute(
+    `
     SELECT p.*, mp.descripcion as metodo_pago_desc
       FROM pagos p 
  LEFT JOIN metodos_pago mp ON p.metodo_id = mp.id
      WHERE p.cliente_id = ?
   ORDER BY p.fecha_pago DESC, p.id DESC
-  `, [cliente_id]);
+  `,
+    [cliente_id]
+  );
   return rows;
 };
 
-// Obtener pagos por mes y año (basado en fecha_pago)
 export const obtenerPagosPorMes = async (mes, anio) => {
   const db = await connectDB();
-  const [rows] = await db.execute(`
+  const [rows] = await db.execute(
+    `
     SELECT p.*, mp.descripcion as metodo_pago_desc,
            c.nombre as cliente_nombre
       FROM pagos p 
@@ -272,7 +289,9 @@ export const obtenerPagosPorMes = async (mes, anio) => {
  LEFT JOIN clientes c      ON p.cliente_id = c.id
      WHERE MONTH(p.fecha_pago) = ? AND YEAR(p.fecha_pago) = ?
   ORDER BY p.fecha_pago DESC, p.id DESC
-  `, [mes, anio]);
+  `,
+    [mes, anio]
+  );
   return rows;
 };
 
@@ -280,7 +299,6 @@ export const obtenerPagosPorMes = async (mes, anio) => {
    Crear / Actualizar / Eliminar pagos
    ============================ */
 
-// Crear nuevo pago (respeta política de saltar suspendidos)
 export const crearPago = async (pago) => {
   const { cliente_id, monto, fecha_pago, metodo_id, referencia, observacion, mes_aplicado, anio_aplicado } = pago;
   const db = await connectDB();
@@ -289,14 +307,18 @@ export const crearPago = async (pago) => {
   try {
     await conn.beginTransaction();
 
-    const { mes, anio } = await resolverMesAplicadoConPolitica(
-      conn, cliente_id, fecha_pago, mes_aplicado, anio_aplicado
+    const { mes, anio, fechaNorm } = await resolverMesAplicadoConPolitica(
+      conn,
+      cliente_id,
+      fecha_pago,
+      mes_aplicado,
+      anio_aplicado
     );
 
     const [result] = await conn.execute(
       `INSERT INTO pagos (cliente_id, monto, fecha_pago, metodo_id, referencia, observacion, mes_aplicado, anio_aplicado)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [cliente_id, monto, fecha_pago, metodo_id, referencia ?? null, observacion ?? null, mes, anio]
+      [cliente_id, monto, fechaNorm, metodo_id, referencia ?? null, observacion ?? null, mes, anio]
     );
 
     const estado = await calcularEstadoMensual(conn, cliente_id, mes, anio);
@@ -319,16 +341,14 @@ const repartirMonto = (total, n) => {
   let remainder = cents - base * n;
   const parts = Array.from({ length: n }, () => base);
   for (let i = 0; i < remainder; i++) parts[i] += 1;
-  return parts.map(c => c / 100);
+  return parts.map((c) => c / 100);
 };
 
-// Crear pagos múltiples (omite meses suspendidos; PERMITE FUTUROS)
 export const crearPagosMultiplesMeses = async (pagosData) => {
   const { cliente_id, monto_total, fecha_pago, metodo_id, referencia, observacion, meses } = pagosData;
   const db = await connectDB();
   const conn = await db.getConnection();
 
-  // Helper sencillo para validar rango de mes/año
   const esMesAnioValido = (mes, anio) =>
     Number.isInteger(mes) && mes >= 1 && mes <= 12 && Number.isInteger(anio) && anio >= 2000 && anio <= 9999;
 
@@ -339,29 +359,28 @@ export const crearPagosMultiplesMeses = async (pagosData) => {
       throw new Error('Debe especificar al menos un mes para el pago.');
     }
 
-    // 1) Normalizamos y validamos mes/año (pero YA NO restringimos a pasado/presente)
+    // ✅ Blindaje fecha
+    const fechaNorm = normalizarFechaPagoYYYYMMDD(fecha_pago);
+
     const mesesNormalizados = [];
-    for (const { mes, anio } of meses) {
-      const m = parseInt(mes);
-      const a = parseInt(anio);
-      if (!esMesAnioValido(m, a)) {
-        throw new Error(`Mes/Año inválidos: ${mes}/${anio}`);
-      }
+    for (const item of meses) {
+      const m = parseInt(item.mes, 10);
+      const a = parseInt(item.anio, 10);
+      if (!esMesAnioValido(m, a)) throw new Error(`Mes/Año inválidos: ${item.mes}/${item.anio}`);
       mesesNormalizados.push({ mes: m, anio: a });
     }
 
-    // 2) Filtra: omitir suspendidos
     const mesesNoSuspendidos = [];
     for (const { mes, anio } of mesesNormalizados) {
       const fila = await obtenerEstadoMensualFila(conn, cliente_id, mes, anio);
       if (fila?.estado === 'Suspendido') continue;
       mesesNoSuspendidos.push({ mes, anio });
     }
+
     if (mesesNoSuspendidos.length === 0) {
       throw new Error('Los meses seleccionados están suspendidos. No hay meses disponibles para aplicar el pago.');
     }
 
-    // 3) Repartición exacta según cantidad final de meses
     const montos = repartirMonto(monto_total, mesesNoSuspendidos.length);
 
     const resultados = [];
@@ -372,7 +391,7 @@ export const crearPagosMultiplesMeses = async (pagosData) => {
       const [result] = await conn.execute(
         `INSERT INTO pagos (cliente_id, monto, fecha_pago, metodo_id, referencia, observacion, mes_aplicado, anio_aplicado)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [cliente_id, montoPorMes, fecha_pago, metodo_id, referencia ?? null, observacion ?? null, mes, anio]
+        [cliente_id, montoPorMes, fechaNorm, metodo_id, referencia ?? null, observacion ?? null, mes, anio]
       );
 
       const estado = await calcularEstadoMensual(conn, cliente_id, mes, anio);
@@ -391,52 +410,55 @@ export const crearPagosMultiplesMeses = async (pagosData) => {
   }
 };
 
-// Actualizar pago (reaplica política si el mes nuevo cae en suspendido)
 export const actualizarPago = async (id, pago) => {
   const { cliente_id, monto, fecha_pago, metodo_id, referencia, observacion, mes_aplicado, anio_aplicado } = pago;
   const db = await connectDB();
   const conn = await db.getConnection();
-  
+
   try {
     await conn.beginTransaction();
 
-    // Obtener pago original
     const [oldRows] = await conn.execute('SELECT * FROM pagos WHERE id = ?', [id]);
     if (oldRows.length === 0) throw new Error('Pago no encontrado');
     const old = oldRows[0];
 
-    // Resolver nuevo mes/año con política
-    const { mes: newMesAplicado, anio: newAnioAplicado } = await resolverMesAplicadoConPolitica(
-      conn, cliente_id, fecha_pago, mes_aplicado, anio_aplicado
+    const { mes: newMesAplicado, anio: newAnioAplicado, fechaNorm } = await resolverMesAplicadoConPolitica(
+      conn,
+      cliente_id,
+      fecha_pago,
+      mes_aplicado,
+      anio_aplicado
     );
 
-    // Actualizar pago
     await conn.execute(
       `UPDATE pagos
           SET cliente_id = ?, monto = ?, fecha_pago = ?, metodo_id = ?, referencia = ?, 
               observacion = ?, mes_aplicado = ?, anio_aplicado = ?
         WHERE id = ?`,
       [
-        cliente_id, monto, fecha_pago, metodo_id, referencia ?? null, 
-        observacion ?? null, newMesAplicado, newAnioAplicado, id
+        cliente_id,
+        monto,
+        fechaNorm,
+        metodo_id,
+        referencia ?? null,
+        observacion ?? null,
+        newMesAplicado,
+        newAnioAplicado,
+        id,
       ]
     );
 
-    // Recalcular estados mensuales afectados
     const claves = new Set([
       `${old.mes_aplicado}-${old.anio_aplicado}-${old.cliente_id}`,
-      `${newMesAplicado}-${newAnioAplicado}-${cliente_id}`
+      `${newMesAplicado}-${newAnioAplicado}-${cliente_id}`,
     ]);
-    if (old.cliente_id !== cliente_id) {
-      claves.add(`${old.mes_aplicado}-${old.anio_aplicado}-${old.cliente_id}`);
-    }
 
     for (const key of claves) {
       const [mesStr, anioStr, clienteIdStr] = key.split('-');
-      const mesRecalc = parseInt(mesStr);
-      const anioRecalc = parseInt(anioStr);
-      const clienteRecalc = parseInt(clienteIdStr);
-      
+      const mesRecalc = parseInt(mesStr, 10);
+      const anioRecalc = parseInt(anioStr, 10);
+      const clienteRecalc = parseInt(clienteIdStr, 10);
+
       const estado = await calcularEstadoMensual(conn, clienteRecalc, mesRecalc, anioRecalc);
       await upsertEstadoMensual(conn, clienteRecalc, mesRecalc, anioRecalc, estado);
     }
@@ -451,11 +473,10 @@ export const actualizarPago = async (id, pago) => {
   }
 };
 
-// Eliminar pago
 export const eliminarPago = async (id) => {
   const db = await connectDB();
   const conn = await db.getConnection();
-  
+
   try {
     await conn.beginTransaction();
 
@@ -484,7 +505,8 @@ export const eliminarPago = async (id) => {
 
 export const obtenerResumenPagosCliente = async (cliente_id, mes, anio) => {
   const db = await connectDB();
-  const [rows] = await db.execute(`
+  const [rows] = await db.execute(
+    `
     SELECT 
       c.nombre,
       p.precio_mensual,
@@ -501,19 +523,21 @@ export const obtenerResumenPagosCliente = async (cliente_id, mes, anio) => {
                     AND pg.anio_aplicado = ?
      WHERE c.id = ?
   GROUP BY c.id, p.precio_mensual
-  `, [mes, anio, cliente_id]);
-  
+  `,
+    [mes, anio, cliente_id]
+  );
+
   return rows[0] || null;
 };
 
-// Meses pendientes (excluye suspendidos para fines de cobro)
 export const obtenerMesesPendientes = async (cliente_id) => {
   const db = await connectDB();
   const hoy = new Date();
   const y = hoy.getFullYear();
   const m = hoy.getMonth() + 1;
 
-  const [rows] = await db.execute(`
+  const [rows] = await db.execute(
+    `
     SELECT 
       em.id,
       em.mes,
@@ -530,9 +554,11 @@ export const obtenerMesesPendientes = async (cliente_id) => {
       JOIN planes p   ON c.plan_id = p.id
      WHERE em.cliente_id = ?
        AND (em.anio < ? OR (em.anio = ? AND em.mes <= ?))
-       AND em.estado NOT IN ('Pagado','Suspendido')   -- << omite suspendidos aquí >>
+       AND em.estado NOT IN ('Pagado','Suspendido')
   ORDER BY em.anio DESC, em.mes DESC
-  `, [cliente_id, cliente_id, y, y, m]);
+  `,
+    [cliente_id, cliente_id, y, y, m]
+  );
 
   return rows;
 };
