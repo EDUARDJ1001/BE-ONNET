@@ -35,18 +35,25 @@ export const obtenerEstadoPorClienteYAno = async (clienteId, anio) => {
   return completos;
 };
 
-// UPSERT idempotente para evitar ER_DUP_ENTRY
+// Crea la fila del mes SOLO si no existe. Nunca pisa un estado ya guardado.
+//
+// Antes hacía `ON DUPLICATE KEY UPDATE estado = VALUES(estado)`, y con eso un
+// POST con 'Pendiente' borraba un mes que ya estaba 'Pagado': el pago seguía en
+// la tabla `pagos` pero el mes aparecía impago, y terminaba cobrándose dos
+// veces. El estado de pago lo calcula pagoModel sumando los pagos del mes, y
+// los estados manuales ('Suspendido') se ponen con actualizarEstadoMensual.
+// Este endpoint sólo inicializa meses que faltan.
 export const crearEstadoMensual = async (registro) => {
   const { cliente_id, mes, anio, estado } = registro;
   const db = await connectDB();
   const sql = `
     INSERT INTO estado_mensual (cliente_id, mes, anio, estado)
     VALUES (?, ?, ?, ?)
-    ON DUPLICATE KEY UPDATE estado = VALUES(estado)
+    ON DUPLICATE KEY UPDATE id = id
   `;
   const [result] = await db.execute(sql, [cliente_id, mes, anio, estado]);
-  // insertId solo si creó; con upsert puede ser 0, devolvemos algo coherente
-  return result.insertId || 0;
+  // affectedRows vale 1 si insertó y 0 si la fila ya existía y quedó intacta.
+  return { id: result.insertId || 0, creado: result.affectedRows === 1 };
 };
 
 export const actualizarEstadoMensual = async (id, data) => {

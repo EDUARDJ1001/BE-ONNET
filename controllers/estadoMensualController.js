@@ -42,8 +42,14 @@ export const createEstado = async (req, res) => {
     if (!cliente_id || !mes || !anio || !estado) {
       return res.status(400).json({ message: 'cliente_id, mes, anio y estado son requeridos.' });
     }
-    const nuevoId = await EstadoModel.crearEstadoMensual(req.body); // upsert idempotente
-    res.status(201).json({ message: 'Estado creado/actualizado', id: nuevoId });
+    // Inicializa el mes si falta. Si ya existía, se respeta lo que hay: para
+    // cambiar un estado a mano está PUT /api/estado-mensual/:id.
+    const { id, creado } = await EstadoModel.crearEstadoMensual(req.body);
+    res.status(201).json({
+      message: creado ? 'Estado creado' : 'El mes ya existía, se mantuvo su estado',
+      id,
+      creado
+    });
   } catch (error) {
     console.error('Error al crear estado:', error);
     res.status(500).json({ message: 'Error del servidor' });

@@ -87,7 +87,6 @@ const buscarUltimoMesPendienteNoSuspendido = async (conn, clientetv_id) => {
               WHERE pg.clientetv_id = em.clientetv_id
                 AND pg.mes_aplicado = em.mes
                 AND pg.anio_aplicado = em.anio
-                AND (pg.anulado IS NULL OR pg.anulado = 0)
             ) AS total_pagado
        FROM estado_mensual_tv em
       WHERE em.clientetv_id = ?
