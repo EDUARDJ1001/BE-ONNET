@@ -76,6 +76,13 @@ const validarMesAplicado = (mes, anio, { permitirFuturos = false, maxMesesFuturo
    Helpers de negocio
    ============================ */
 
+// Meses que no se le pueden cobrar al cliente:
+// - 'Suspendido': decisión del negocio, no se factura.
+// - 'Sin servicio': anterior a la instalación, todavía no era cliente.
+const ESTADOS_NO_COBRABLES = ['Suspendido', 'Sin servicio'];
+
+const esMesNoCobrable = (estado) => ESTADOS_NO_COBRABLES.includes(estado);
+
 // Lee suspensión desde estado_mensual.
 // Regla: si existe registro para ese (cliente, mes, anio) y su estado = 'Suspendido' => está suspendido.
 // Si no hay registro EXACTO, opcionalmente puedes mirar el último estado <= ese mes (fallback).
@@ -128,7 +135,7 @@ const buscarUltimoMesPendienteNoSuspendido = async (conn, cliente_id) => {
   );
 
   for (const r of rows) {
-    if (r.estado === 'Suspendido') continue;
+    if (esMesNoCobrable(r.estado)) continue;
     const total = Number(r.total_pagado || 0);
     const completo = precioMensual > 0 ? total >= precioMensual : total > 0;
     if (!completo) return { mes: r.mes, anio: r.anio };
@@ -372,12 +379,12 @@ export const crearPagosMultiplesMeses = async (pagosData) => {
     const mesesNoSuspendidos = [];
     for (const { mes, anio } of mesesNormalizados) {
       const fila = await obtenerEstadoMensualFila(conn, cliente_id, mes, anio);
-      if (fila?.estado === 'Suspendido') continue;
+      if (esMesNoCobrable(fila?.estado)) continue;
       mesesNoSuspendidos.push({ mes, anio });
     }
 
     if (mesesNoSuspendidos.length === 0) {
-      throw new Error('Los meses seleccionados están suspendidos. No hay meses disponibles para aplicar el pago.');
+      throw new Error('Los meses seleccionados están suspendidos o sin servicio. No hay meses disponibles para aplicar el pago.');
     }
 
     const montos = repartirMonto(monto_total, mesesNoSuspendidos.length);
@@ -553,7 +560,7 @@ export const obtenerMesesPendientes = async (cliente_id) => {
       JOIN planes p   ON c.plan_id = p.id
      WHERE em.cliente_id = ?
        AND (em.anio < ? OR (em.anio = ? AND em.mes <= ?))
-       AND em.estado NOT IN ('Pagado','Suspendido')
+       AND em.estado NOT IN ('Pagado','Suspendido','Sin servicio')
   ORDER BY em.anio DESC, em.mes DESC
   `,
     [cliente_id, cliente_id, y, y, m]

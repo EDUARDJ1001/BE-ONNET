@@ -189,7 +189,7 @@ export const createPagosMultiples = async (req, res) => {
     res.status(201).json({
       message: `Pagos registrados exitosamente.`,
       totales: { solicitados, aplicados, omitidos },
-      motivo_omision_posible: 'Meses con estado Suspendido fueron omitidos según la política.',
+      motivo_omision_posible: 'Meses con estado Suspendido o Sin servicio fueron omitidos según la política.',
       pagos: resultados, // [{id, mes_aplicado, anio_aplicado, monto}]
       monto_por_mes: resultados.map(r => r.monto),
       meses_aplicados: resultados.map(r => ({ mes: r.mes_aplicado, anio: r.anio_aplicado }))
@@ -201,7 +201,7 @@ export const createPagosMultiples = async (req, res) => {
     const es400 =
       error.message === 'Debe especificar al menos un mes para el pago.' ||
       error.message?.startsWith('Mes/Año inválidos:') ||
-      error.message === 'Los meses seleccionados están suspendidos. No hay meses disponibles para aplicar el pago.';
+      error.message === 'Los meses seleccionados están suspendidos o sin servicio. No hay meses disponibles para aplicar el pago.';
 
     if (es400) {
       return res.status(400).json({ message: error.message });
