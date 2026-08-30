@@ -105,14 +105,19 @@ export const crearCliente = async (cliente) => {
 
     // 4) Generar estados mensuales para todo el año actual
     //
-    // Antes se marcaban como 'Pagado' todos los meses hasta el de instalación
-    // inclusive, sin que existiera ningún registro en `pagos`. Eso inventaba
-    // historial de cobros y, como el mes de instalación también quedaba pagado,
-    // el primer mes del cliente nunca aparecía como cobrable.
+    // Antes se marcaban como 'Pagado' TODOS los meses hasta el de instalación,
+    // sin ningún registro en `pagos`: eso inventaba meses cobrados que nunca
+    // se cobraron. Lo que sí corresponde es el mes de la instalación, porque
+    // el servicio de instalación lo cubre.
     //
-    // Ahora: antes de la instalación -> 'Sin servicio' (no era cliente todavía),
-    // del mes de instalación en adelante -> 'Pendiente'. Si llega un pago, es
-    // pagoModel el que pasa el mes a 'Pagado' sumando lo realmente cobrado.
+    // Reglas:
+    //   antes de la instalación -> 'Sin servicio' (no era cliente todavía)
+    //   mes de la instalación   -> 'Pagado'       (lo cubre la instalación)
+    //   después                 -> 'Pendiente'    (lo define pagoModel al cobrar)
+    //
+    // El mes de instalación queda 'Pagado' sin un pago detrás, así que
+    // recalcular_estado_mensual.sql lo excluye a propósito; si no, se lo
+    // llevaría de vuelta a 'Pendiente' en cada corrida.
     //
     // La fecha viene como 'YYYY-MM-DD' y se parte por texto: new Date() sobre
     // ese formato corre el mes en zonas horarias negativas como la nuestra.
@@ -128,8 +133,11 @@ export const crearCliente = async (cliente) => {
     const placeholders = [];
 
     for (let mes = 1; mes <= 12; mes++) {
+      const periodo = añoActual * 12 + mes;
       const estado =
-        añoActual * 12 + mes < inicioServicio ? 'Sin servicio' : 'Pendiente';
+        periodo < inicioServicio ? 'Sin servicio'
+        : periodo === inicioServicio ? 'Pagado'
+        : 'Pendiente';
       values.push(clienteId, mes, añoActual, estado);
       placeholders.push('(?, ?, ?, ?)');
     }

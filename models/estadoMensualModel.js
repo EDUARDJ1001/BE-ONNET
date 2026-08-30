@@ -62,14 +62,16 @@ export const obtenerEstadoPorClienteYAno = async (clienteId, anio) => {
       continue;
     }
 
-    const previoALaInstalacion =
-      inicioServicio !== null && anio * 12 + m < inicioServicio;
+    const periodo = anio * 12 + m;
+    let estado = 'Pendiente';
+    if (inicioServicio !== null) {
+      // Antes de la instalación no era cliente; el mes de la instalación va
+      // pagado porque lo cubre el servicio de instalación.
+      if (periodo < inicioServicio) estado = 'Sin servicio';
+      else if (periodo === inicioServicio) estado = 'Pagado';
+    }
 
-    completos.push({
-      mes: m,
-      anio,
-      estado: previoALaInstalacion ? 'Sin servicio' : 'Pendiente'
-    });
+    completos.push({ mes: m, anio, estado });
   }
 
   return completos;
