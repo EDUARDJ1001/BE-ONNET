@@ -183,6 +183,98 @@ const resolverMesAplicadoConPolitica = async (conn, cliente_id, fecha_pago, mes_
 };
 
 /* ============================
+   Distribución del pago entre meses
+   ============================ */
+
+// Hasta cuántos meses hacia adelante puede correrse un pago. Evita que un
+// monto mal tecleado se reparta en años de mensualidades por adelantado.
+const MAX_MESES_ADELANTE = 24;
+
+const siguienteMes = (mes, anio) =>
+  mes === 12 ? { mes: 1, anio: anio + 1 } : { mes: mes + 1, anio };
+
+// Cuánto falta para dar por cubierto un mes.
+//
+// Devuelve 0 si el mes no se cobra ('Suspendido', 'Sin servicio') o si ya está
+// dado por pagado. Ese último caso importa por el mes de instalación: va
+// 'Pagado' por regla de negocio y no tiene pagos detrás, así que sin este
+// chequeo un pago se le "metería" ahí en lugar de correr al siguiente.
+const saldoDelMes = async (conn, cliente_id, mes, anio, precioMensual) => {
+  const [[fila]] = await conn.execute(
+    `SELECT estado FROM estado_mensual
+      WHERE cliente_id = ? AND mes = ? AND anio = ?`,
+    [cliente_id, mes, anio]
+  );
+
+  if (fila && (esMesNoCobrable(fila.estado) || fila.estado === 'Pagado')) return 0;
+  if (precioMensual <= 0) return 0;
+
+  const [[sumRow]] = await conn.execute(
+    `SELECT COALESCE(SUM(monto),0) AS total
+       FROM pagos
+      WHERE cliente_id = ? AND mes_aplicado = ? AND anio_aplicado = ?`,
+    [cliente_id, mes, anio]
+  );
+
+  return Math.max(0, precioMensual - Number(sumRow.total));
+};
+
+// Reparte un pago desde un mes hacia adelante, cubriendo el saldo de cada uno.
+//
+// El caso que resuelve: un cliente debe una parte de abril y paga completo.
+// Abril se cierra con lo que le faltaba y el sobrante corre a mayo, que queda
+// parcial. Antes todo el monto se quedaba en abril y el excedente no se veía
+// por ningún lado.
+//
+// Devuelve [{ mes, anio, monto }]. Con un pago normal (el monto justo de un
+// mes) devuelve un solo elemento, igual que antes.
+const distribuirPago = async (conn, cliente_id, mesInicio, anioInicio, montoTotal) => {
+  const [[cli]] = await conn.execute(
+    `SELECT p.precio_mensual
+       FROM clientes c JOIN planes p ON p.id = c.plan_id
+      WHERE c.id = ?`,
+    [cliente_id]
+  );
+  if (!cli) throw new Error(`Cliente ${cliente_id} sin plan asociado`);
+  const precioMensual = Number(cli.precio_mensual ?? 0);
+
+  // Se trabaja en centavos para no arrastrar errores de redondeo.
+  let restante = Math.round(Number(montoTotal) * 100);
+  if (restante <= 0) throw new Error('El monto debe ser mayor a 0.');
+
+  const reparto = [];
+  let { mes, anio } = { mes: mesInicio, anio: anioInicio };
+  let ultimoCobrable = null;
+
+  for (let i = 0; i < MAX_MESES_ADELANTE && restante > 0; i++) {
+    const saldo = Math.round(
+      (await saldoDelMes(conn, cliente_id, mes, anio, precioMensual)) * 100
+    );
+
+    if (saldo > 0) {
+      const aplica = Math.min(restante, saldo);
+      reparto.push({ mes, anio, monto: aplica / 100 });
+      restante -= aplica;
+      ultimoCobrable = { mes, anio };
+    }
+
+    ({ mes, anio } = siguienteMes(mes, anio));
+  }
+
+  // Sobrante tras cubrir todo lo alcanzable: se deja en el último mes al que
+  // se pudo aplicar, o en el mes de origen si no hubo ninguno. Así el dinero
+  // siempre queda registrado y cuadra con el arqueo.
+  if (restante > 0) {
+    const destino = ultimoCobrable ?? { mes: mesInicio, anio: anioInicio };
+    const previo = reparto.find((r) => r.mes === destino.mes && r.anio === destino.anio);
+    if (previo) previo.monto = Math.round((previo.monto * 100 + restante)) / 100;
+    else reparto.push({ ...destino, monto: restante / 100 });
+  }
+
+  return reparto;
+};
+
+/* ============================
    Cálculo / Upsert de estado mensual
    ============================ */
 
@@ -329,17 +421,36 @@ export const crearPago = async (pago) => {
       anio_aplicado
     );
 
-    const [result] = await conn.execute(
-      `INSERT INTO pagos (cliente_id, monto, fecha_pago, metodo_id, referencia, observacion, mes_aplicado, anio_aplicado)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [cliente_id, monto, fechaNorm, metodo_id, referencia ?? null, observacion ?? null, mes, anio]
-    );
+    // El pago cubre el saldo del mes y lo que sobra corre a los siguientes.
+    // Con un monto normal esto devuelve un solo tramo y se comporta igual que
+    // antes; sólo cambia cuando hay excedente sobre lo que faltaba.
+    const reparto = await distribuirPago(conn, cliente_id, mes, anio, monto);
 
-    const estado = await calcularEstadoMensual(conn, cliente_id, mes, anio);
-    await upsertEstadoMensual(conn, cliente_id, mes, anio, estado);
+    const tramos = [];
+    for (const tramo of reparto) {
+      const [result] = await conn.execute(
+        `INSERT INTO pagos (cliente_id, monto, fecha_pago, metodo_id, referencia, observacion, mes_aplicado, anio_aplicado)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [cliente_id, tramo.monto, fechaNorm, metodo_id, referencia ?? null,
+         observacion ?? null, tramo.mes, tramo.anio]
+      );
+
+      const estado = await calcularEstadoMensual(conn, cliente_id, tramo.mes, tramo.anio);
+      await upsertEstadoMensual(conn, cliente_id, tramo.mes, tramo.anio, estado);
+
+      tramos.push({ id: result.insertId, mes: tramo.mes, anio: tramo.anio, monto: tramo.monto });
+    }
 
     await conn.commit();
-    return { id: result.insertId, mes_aplicado: mes, anio_aplicado: anio };
+
+    // Se conserva la forma de respuesta anterior (id/mes/anio del primer
+    // tramo) para no romper al frontend, y se agrega el detalle completo.
+    return {
+      id: tramos[0].id,
+      mes_aplicado: tramos[0].mes,
+      anio_aplicado: tramos[0].anio,
+      distribucion: tramos
+    };
   } catch (e) {
     await conn.rollback();
     throw e;

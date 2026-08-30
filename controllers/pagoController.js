@@ -120,13 +120,26 @@ export const createPago = async (req, res) => {
       nota = 'Si existían meses suspendidos, el pago se aplicó al último mes pendiente no suspendido.';
     }
 
-    res.status(201).json({ 
-      message: 'Pago registrado exitosamente', 
+    // Si el monto alcanzó para más de un mes, se avisa cómo quedó repartido:
+    // el cajero necesita poder explicárselo al cliente en el mostrador.
+    const distribucion = resultado.distribucion ?? [];
+    if (distribucion.length > 1) {
+      const MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+                     'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+      const detalle = distribucion
+        .map(t => `L.${Number(t.monto).toFixed(2)} a ${MESES[t.mes - 1]} ${t.anio}`)
+        .join(', ');
+      nota = `El pago cubrió más de un mes: ${detalle}.`;
+    }
+
+    res.status(201).json({
+      message: 'Pago registrado exitosamente',
       id: resultado.id,
       aplicado_a: {
         mes: resultado.mes_aplicado,
         anio: resultado.anio_aplicado
       },
+      distribucion,
       nota
     });
   } catch (error) {
