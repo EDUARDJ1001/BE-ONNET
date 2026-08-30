@@ -284,17 +284,25 @@ export const obtenerPagosPorCliente = async (cliente_id) => {
   return rows;
 };
 
+// Pagos registrados durante el mes. Es la base del arqueo y del historial.
+//
+// Filtra por `fecha_emision`, no por `fecha_pago`: la segunda la escribe el
+// cajero y poniéndola en un mes lejano el cobro desaparecía del conteo.
+// `fecha_emision` la pone la base de datos al insertar y no se puede editar,
+// así que el dinero siempre cae en el mes en que realmente entró.
 export const obtenerPagosPorMes = async (mes, anio) => {
   const db = await connectDB();
   const [rows] = await db.execute(
     `
     SELECT p.*, mp.descripcion as metodo_pago_desc,
-           c.nombre as cliente_nombre
-      FROM pagos p 
+           c.nombre as cliente_nombre,
+           u.nombre as usuario_nombre, u.apellido as usuario_apellido
+      FROM pagos p
  LEFT JOIN metodos_pago mp ON p.metodo_id = mp.id
  LEFT JOIN clientes c      ON p.cliente_id = c.id
-     WHERE MONTH(p.fecha_pago) = ? AND YEAR(p.fecha_pago) = ?
-  ORDER BY p.fecha_pago DESC, p.id DESC
+ LEFT JOIN usuarios u      ON p.usuario_id = u.id
+     WHERE MONTH(p.fecha_emision) = ? AND YEAR(p.fecha_emision) = ?
+  ORDER BY p.fecha_emision DESC, p.id DESC
   `,
     [mes, anio]
   );
@@ -416,6 +424,9 @@ export const crearPagosMultiplesMeses = async (pagosData) => {
   }
 };
 
+// Edita un pago. `fecha_emision` y `usuario_id` NO se tocan a propósito: son
+// el registro de cuándo y quién capturó el cobro, y perderían todo sentido si
+// se pudieran editar después. Tampoco se aceptan desde el body.
 export const actualizarPago = async (id, pago) => {
   const { cliente_id, monto, fecha_pago, metodo_id, referencia, observacion, mes_aplicado, anio_aplicado } = pago;
   const db = await connectDB();
