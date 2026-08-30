@@ -104,37 +104,35 @@ export const crearCliente = async (cliente) => {
     const clienteId = resCliente.insertId;
 
     // 4) Generar estados mensuales para todo el año actual
-    const fechaInstalacion = new Date(fechaInstalacionFormateada);
-    const ahora = new Date();
-    const añoActual = ahora.getFullYear();
+    //
+    // Antes se marcaban como 'Pagado' todos los meses hasta el de instalación
+    // inclusive, sin que existiera ningún registro en `pagos`. Eso inventaba
+    // historial de cobros y, como el mes de instalación también quedaba pagado,
+    // el primer mes del cliente nunca aparecía como cobrable.
+    //
+    // Ahora: antes de la instalación -> 'Sin servicio' (no era cliente todavía),
+    // del mes de instalación en adelante -> 'Pendiente'. Si llega un pago, es
+    // pagoModel el que pasa el mes a 'Pagado' sumando lo realmente cobrado.
+    //
+    // La fecha viene como 'YYYY-MM-DD' y se parte por texto: new Date() sobre
+    // ese formato corre el mes en zonas horarias negativas como la nuestra.
+    const [añoInstalacion, mesInstalacion] = fechaInstalacionFormateada
+      .split('-')
+      .map(Number);
+    const añoActual = new Date().getFullYear();
 
-    // Generar todos los meses del año actual (1 al 12)
-    const todosLosMeses = Array.from({ length: 12 }, (_, i) => i + 1);
+    // Año y mes en un solo número, para comparar de una sola vez.
+    const inicioServicio = añoInstalacion * 12 + mesInstalacion;
 
-    // Determinar qué meses deben estar como "Pagado"
-    const mesInstalacion = fechaInstalacion.getMonth() + 1; // Mes de instalación (1-12)
-    const añoInstalacion = fechaInstalacion.getFullYear();
-
-    let mesesPagados = [];
-
-    if (añoInstalacion === añoActual) {
-      // Todos los meses desde ENERO hasta el mes de instalación (incluyendo)
-      mesesPagados = todosLosMeses.filter(mes => mes <= mesInstalacion);
-    } else if (añoInstalacion < añoActual) {
-      // Si la instalación fue en año anterior: todos los meses son "Pagado"
-      mesesPagados = todosLosMeses;
-    }
-    // Si la instalación es futura (año > actual), mesesPagados queda vacío
-
-    // Preparar los valores para la inserción
     const values = [];
     const placeholders = [];
 
-    todosLosMeses.forEach(mes => {
-      const estado = mesesPagados.includes(mes) ? 'Pagado' : 'Pendiente';
+    for (let mes = 1; mes <= 12; mes++) {
+      const estado =
+        añoActual * 12 + mes < inicioServicio ? 'Sin servicio' : 'Pendiente';
       values.push(clienteId, mes, añoActual, estado);
       placeholders.push('(?, ?, ?, ?)');
-    });
+    }
 
     if (values.length > 0) {
       await conn.execute(`
@@ -211,25 +209,40 @@ export const actualizarCliente = async (id, cliente) => {
 };
 
 // Función auxiliar para formatear fechas para MySQL
+// Devuelve la fecha como 'YYYY-MM-DD', sin correrla de día.
+//
+// La versión anterior hacía `new Date(fecha)` y después restaba el offset de
+// zona horaria. Con un texto 'YYYY-MM-DD' eso lo interpreta como medianoche
+// UTC y al restarle 6 horas caía en el día anterior: '2026-08-01' se guardaba
+// como '2026-07-31', y '2026-01-01' como '2025-12-31'. Como de esta fecha
+// depende desde qué mes el cliente tiene servicio, corría un mes entero.
+//
+// Mismo criterio que normalizarFechaPagoYYYYMMDD en pagoModel: si el texto ya
+// trae la fecha, se usa tal cual y no se construye ningún Date.
 export const formatFechaParaMySQL = (fecha) => {
   if (!fecha) return null;
 
   try {
-    const dateObj = new Date(fecha);
-
-    // Si la fecha es inválida
-    if (isNaN(dateObj.getTime())) {
-      return new Date().toISOString().split('T')[0];
+    if (typeof fecha === 'string') {
+      // Ya viene 'YYYY-MM-DD' o un ISO completo 'YYYY-MM-DDTHH:mm:ss...'
+      const soloFecha = fecha.match(/^(\d{4}-\d{2}-\d{2})/);
+      if (soloFecha) return soloFecha[1];
     }
 
-    // Compensar el timezone offset para mantener la fecha local
-    const offset = dateObj.getTimezoneOffset();
-    const localDate = new Date(dateObj.getTime() - (offset * 60 * 1000));
+    // Un Date: se leen sus componentes locales, sin pasar por toISOString(),
+    // que convierte a UTC y vuelve a correr el día.
+    const dateObj = fecha instanceof Date ? fecha : new Date(fecha);
+    const valido = !Number.isNaN(dateObj.getTime()) ? dateObj : new Date();
 
-    return localDate.toISOString().split('T')[0];
+    const anio = valido.getFullYear();
+    const mes = String(valido.getMonth() + 1).padStart(2, '0');
+    const dia = String(valido.getDate()).padStart(2, '0');
+
+    return `${anio}-${mes}-${dia}`;
   } catch (error) {
     console.error('Error formateando fecha:', error);
-    return new Date().toISOString().split('T')[0];
+    const hoy = new Date();
+    return `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, '0')}-${String(hoy.getDate()).padStart(2, '0')}`;
   }
 };
 

@@ -12,9 +12,22 @@ export const obtenerEstadoPorId = async (id) => {
   return rows[0];
 };
 
-// SIEMPRE devuelve 12 meses (rellena faltantes con 'Pendiente')
+// SIEMPRE devuelve los 12 meses del año.
+//
+// Los meses que no tienen fila se completan al vuelo:
+//   - anteriores a la instalación -> 'Sin servicio' (todavía no era cliente)
+//   - de la instalación en adelante -> 'Pendiente'
+//
+// "Sin servicio" no se guarda en la tabla: se deduce de `fecha_instalacion`, así
+// que no puede quedar desincronizado si esa fecha se corrige después. Los años
+// anteriores a la instalación directamente no tienen filas, y así se muestran
+// bien sin necesidad de crearlas.
+//
+// Si el mes SÍ tiene fila, se respeta lo guardado: un pago registrado o un
+// 'Suspendido' puesto a mano manda sobre lo que se pueda deducir.
 export const obtenerEstadoPorClienteYAno = async (clienteId, anio) => {
   const db = await connectDB();
+
   const [rows] = await db.execute(
     `SELECT mes, anio, estado
      FROM estado_mensual
@@ -23,15 +36,42 @@ export const obtenerEstadoPorClienteYAno = async (clienteId, anio) => {
     [clienteId, anio]
   );
 
+  // El año y el mes se piden ya separados a MySQL para no depender de cómo
+  // JavaScript interprete la fecha (new Date('2026-08-01') corre el mes en
+  // zonas horarias negativas como la nuestra).
+  const [[instalacion]] = await db.execute(
+    `SELECT YEAR(fecha_instalacion)  AS anio_inst,
+            MONTH(fecha_instalacion) AS mes_inst
+       FROM clientes
+      WHERE id = ?`,
+    [clienteId]
+  );
+
+  // Año y mes en un solo número, para comparar de una sola vez.
+  const inicioServicio = instalacion?.anio_inst
+    ? instalacion.anio_inst * 12 + instalacion.mes_inst
+    : null;
+
   const mapa = new Map(rows.map(r => [r.mes, r.estado]));
   const completos = [];
+
   for (let m = 1; m <= 12; m++) {
+    const guardado = mapa.get(m);
+    if (guardado) {
+      completos.push({ mes: m, anio, estado: guardado });
+      continue;
+    }
+
+    const previoALaInstalacion =
+      inicioServicio !== null && anio * 12 + m < inicioServicio;
+
     completos.push({
       mes: m,
       anio,
-      estado: mapa.get(m) || 'Pendiente'
+      estado: previoALaInstalacion ? 'Sin servicio' : 'Pendiente'
     });
   }
+
   return completos;
 };
 
