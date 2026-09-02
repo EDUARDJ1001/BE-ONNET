@@ -53,6 +53,22 @@ export const getPagosPorMes = async (req, res) => {
   }
 };
 
+export const getPagosDelMesPorCliente = async (req, res) => {
+  try {
+    const { cliente_id, mes, anio } = req.params;
+    const detalle = await PagoModel.obtenerPagosDelMesPorCliente(
+      parseInt(cliente_id),
+      parseInt(mes),
+      parseInt(anio)
+    );
+    if (!detalle) return res.status(404).json({ message: 'Cliente no encontrado' });
+    res.json(detalle);
+  } catch (error) {
+    console.error('Error al obtener pagos del mes:', error);
+    res.status(500).json({ message: 'Error del servidor' });
+  }
+};
+
 export const getResumenPagosCliente = async (req, res) => {
   try {
     const { cliente_id, mes, anio } = req.params;

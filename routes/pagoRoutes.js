@@ -2,6 +2,7 @@
 import express from 'express';
 import {
   getPagos, getMetodosPago, getPagoById, getPagosPorCliente, getPagosPorMes,
+  getPagosDelMesPorCliente,
   getResumenPagosCliente, createPago, updatePago, deletePago, getMesesPendientes,
   createPagosMultiples
 } from '../controllers/pagoController.js';
@@ -30,6 +31,7 @@ router.get('/', getPagos);
 router.get('/metodos', getMetodosPago);
 router.get('/cliente/:cliente_id', ensureInt('cliente_id'), getPagosPorCliente);
 router.get('/mes/:mes/:anio', ensureMes, ensureAnio, getPagosPorMes);
+router.get('/cliente/:cliente_id/:mes/:anio', ensureInt('cliente_id'), ensureMes, ensureAnio, getPagosDelMesPorCliente);
 router.get('/resumen/:cliente_id/:mes/:anio', ensureInt('cliente_id'), ensureMes, ensureAnio, getResumenPagosCliente);
 router.get('/meses-pendientes/:cliente_id', ensureInt('cliente_id'), getMesesPendientes);
 

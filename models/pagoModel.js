@@ -361,6 +361,69 @@ export const obtenerPagoPorId = async (id) => {
   return rows[0];
 };
 
+// Detalle de lo cobrado a un cliente en un mes concreto.
+//
+// Es lo que necesita la casilla del calendario cuando se hace clic en un mes
+// 'Pagado' o 'Pagado Parcial': el resumen (`obtenerResumenPagosCliente`) sólo
+// devuelve totales, y `obtenerPagosPorCliente` trae el historial completo y
+// obliga a filtrar del lado del navegador.
+//
+// Filtra por `mes_aplicado`/`anio_aplicado` —que es el mes que el pago cubre—
+// y no por `fecha_emision`, porque un pago de enero registrado en marzo tiene
+// que aparecer al abrir enero, no marzo.
+export const obtenerPagosDelMesPorCliente = async (cliente_id, mes, anio) => {
+  const db = await connectDB();
+
+  const [pagos] = await db.execute(
+    `
+    SELECT p.id, p.monto, p.fecha_pago, p.fecha_emision, p.referencia,
+           p.observacion, p.mes_aplicado, p.anio_aplicado,
+           mp.descripcion as metodo_pago_desc,
+           u.nombre as usuario_nombre, u.apellido as usuario_apellido
+      FROM pagos p
+ LEFT JOIN metodos_pago mp ON p.metodo_id = mp.id
+ LEFT JOIN usuarios u      ON p.usuario_id = u.id
+     WHERE p.cliente_id = ? AND p.mes_aplicado = ? AND p.anio_aplicado = ?
+  ORDER BY p.fecha_pago ASC, p.id ASC
+  `,
+    [cliente_id, mes, anio]
+  );
+
+  // El precio del plan y el estado guardado viajan en la misma respuesta para
+  // que el modal pueda mostrar el saldo sin encadenar dos llamadas más.
+  const [info] = await db.execute(
+    `
+    SELECT c.nombre as cliente_nombre,
+           pl.nombre as plan_nombre, pl.precio_mensual,
+           em.estado
+      FROM clientes c
+ LEFT JOIN planes pl        ON c.plan_id = pl.id
+ LEFT JOIN estado_mensual em ON em.cliente_id = c.id
+                            AND em.mes = ? AND em.anio = ?
+     WHERE c.id = ?
+  `,
+    [mes, anio, cliente_id]
+  );
+
+  if (!info.length) return null;
+
+  const precio_mensual = Number(info[0].precio_mensual ?? 0);
+  const total_pagado = pagos.reduce((acc, p) => acc + Number(p.monto), 0);
+
+  return {
+    cliente_id: Number(cliente_id),
+    cliente_nombre: info[0].cliente_nombre,
+    plan_nombre: info[0].plan_nombre,
+    mes: Number(mes),
+    anio: Number(anio),
+    estado: info[0].estado ?? null,
+    precio_mensual,
+    total_pagado,
+    saldo: Math.max(precio_mensual - total_pagado, 0),
+    pagos,
+  };
+};
+
 export const obtenerPagosPorCliente = async (cliente_id) => {
   const db = await connectDB();
   const [rows] = await db.execute(
