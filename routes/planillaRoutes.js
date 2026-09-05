@@ -18,6 +18,10 @@ import {
   eliminarDiaController,
   sugerirIngresoController
 } from '../controllers/planillaDiaController.js';
+import {
+  obtenerCuadriculaController,
+  guardarCuadriculaController
+} from '../controllers/cuadriculaController.js';
 import { verificarToken, requiereModulo } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
@@ -42,6 +46,12 @@ router.put('/:id/colaboradores', guardarColaboradoresController);
 
 // Liquidación: días, devengado, vales, pagado y saldo
 router.get('/:id/liquidacion', obtenerLiquidacionController);
+
+// Cuadrícula: la planilla entera de una vez, como la hoja del Excel.
+// Es la misma información que /:id y /:id/dias, servida en una sola pieza
+// para que la pantalla simplificada no haga una petición por día.
+router.get('/:id/cuadricula', obtenerCuadriculaController);
+router.put('/:id/cuadricula', guardarCuadriculaController);
 
 // Días de trabajo
 router.get('/:id/dias', obtenerDiasController);
