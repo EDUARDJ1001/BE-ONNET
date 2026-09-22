@@ -83,14 +83,33 @@ export const obtenerCuadricula = async (planillaId) => {
       if (g.planilla_dia_id) porDia.get(g.planilla_dia_id)?.gastosDetalle.push(g);
     }
 
+    // Vales y pagos entregados de ESTA quincena: el bloque de abajo del Excel
+    // (columnas VALE, pagado y fecha de pago).
+    const [vales] = await connection.query(
+      `SELECT id, colaborador_id, fecha, monto, descripcion
+         FROM colaborador_vales
+        WHERE planilla_id = ?
+        ORDER BY fecha, id`,
+      [planillaId]
+    );
+
+    const [pagosEntregados] = await connection.query(
+      `SELECT id, colaborador_id, monto, fecha_pago, referencia
+         FROM colaborador_pagos
+        WHERE planilla_id = ?
+        ORDER BY fecha_pago, id`,
+      [planillaId]
+    );
+
     return {
       planilla,
       resumen: resumen || null,
       colaboradores,
       dias: [...porDia.values()],
-      // Gastos del periodo que no pertenecen a un día: la cuadrícula no los
-      // edita, pero los muestra para que el total cuadre con la otra pantalla.
-      gastosGenerales: gastos.filter((g) => !g.planilla_dia_id)
+      // Gastos del periodo que no pertenecen a un día: la hoja GASTO CARRO.
+      gastosGenerales: gastos.filter((g) => !g.planilla_dia_id),
+      vales,
+      pagosEntregados
     };
   } catch (err) {
     console.error('Error al obtener la cuadrícula:', err);
@@ -128,8 +147,19 @@ const VALOR_POR_DEFECTO = {
  *
  * `pagos` y `gastos` sólo se tocan cuando vienen en el cuerpo. Un día donde
  * únicamente se cambió el sector no debe perder sus gastos.
+ *
+ * Además de los días, en la misma transacción viajan:
+ *   - `liquidacion`: el vale y el pago entregado de cada persona (el bloque de
+ *     abajo del Excel). Ver guardarLiquidacion.
+ *   - `gastosGenerales`: los gastos de la quincena sin día (GASTO CARRO).
+ *     Ver guardarGastosGenerales.
+ * Un solo botón Guardar tiene que guardar todo o nada.
  */
-export const guardarCuadricula = async (planillaId, dias, usuarioId = null) => {
+export const guardarCuadricula = async (
+  planillaId,
+  { dias = [], liquidacion, gastosGenerales },
+  usuarioId = null
+) => {
   const pool = await connectDB();
   const connection = await pool.getConnection();
 
@@ -265,15 +295,208 @@ export const guardarCuadricula = async (planillaId, dias, usuarioId = null) => {
       }
     }
 
+    const cambiosLiquidacion = liquidacion
+      ? await guardarLiquidacion(connection, planillaId, liquidacion, usuarioId)
+      : 0;
+
+    const cambiosGastos = gastosGenerales
+      ? await guardarGastosGenerales(connection, planilla, gastosGenerales, usuarioId)
+      : 0;
+
     await connection.commit();
-    return { creados, actualizados };
+    return { creados, actualizados, cambiosLiquidacion, cambiosGastos };
   } catch (err) {
     if (err.codigo !== 'PLANILLA_PAGADA') {
       await connection.rollback();
-      console.error('Error al guardar la cuadrícula:', err);
+      if (!err.codigo) console.error('Error al guardar la cuadrícula:', err);
     }
     throw err;
   } finally {
     connection.release();
   }
+};
+
+/**
+ * Error de negocio con código, para que el controlador responda 409 con el
+ * mensaje en vez de un 500 genérico.
+ */
+const conflicto = (mensaje) => {
+  const error = new Error(mensaje);
+  error.codigo = 'CONFLICTO_CUADRICULA';
+  return error;
+};
+
+/**
+ * Aplica una celda del bloque de abajo (vale o pagado) sobre su tabla.
+ *
+ * En el Excel es UNA celda por persona. En la base puede haber varias filas
+ * (la vista detallada permite anotar varios vales en fechas distintas). La
+ * celda sólo se deja editar cuando hay cero o una fila:
+ *   - sin fila y monto > 0     -> se crea
+ *   - una fila y monto > 0     -> se actualiza (UPDATE, no borrar y crear:
+ *                                  así un pago conserva su fecha de registro)
+ *   - una fila y monto vacío   -> se borra, como vaciar la celda del Excel
+ * Con dos o más, la pantalla muestra el total bloqueado y no manda nada. Si
+ * aun así llega, se rechaza: actualizar una sola de varias filas cambiaría un
+ * total que el usuario no está viendo.
+ */
+const aplicarCelda = async (connection, {
+  tabla, planillaId, colaboradorId, celda, insertar, actualizar, etiqueta
+}) => {
+  const [filas] = await connection.query(
+    `SELECT id FROM ${tabla} WHERE planilla_id = ? AND colaborador_id = ?`,
+    [planillaId, colaboradorId]
+  );
+
+  if (filas.length > 1) {
+    throw conflicto(
+      `Hay varios ${etiqueta} registrados para este colaborador en la quincena. ` +
+      'Edítelos desde la vista detallada.'
+    );
+  }
+
+  const existente = filas[0];
+  const monto = Number(celda.monto) || 0;
+
+  // La pantalla trabaja sobre la foto que cargó. Si la base ya no coincide
+  // con esa foto, alguien lo cambió mientras tanto (por ejemplo desde la vista
+  // detallada) y seguir pisaría su cambio sin que nadie lo note.
+  if (celda.id && (!existente || existente.id !== celda.id)) {
+    throw conflicto(`El ${etiqueta.slice(0, -1)} que intenta cambiar ya no existe. Recargue la planilla.`);
+  }
+  if (!celda.id && existente) {
+    throw conflicto(
+      `Mientras editaba, se registró otro ${etiqueta.slice(0, -1)} para este colaborador. ` +
+      'Recargue la planilla para verlo.'
+    );
+  }
+
+  if (existente && monto > 0) {
+    await actualizar(existente.id, monto);
+    return 1;
+  }
+  if (existente && monto <= 0) {
+    await connection.query(`DELETE FROM ${tabla} WHERE id = ?`, [existente.id]);
+    return 1;
+  }
+  if (!existente && monto > 0) {
+    await insertar(monto);
+    return 1;
+  }
+  return 0;
+};
+
+/**
+ * El bloque de abajo: vale y pago entregado por persona.
+ *
+ * `fecha_registro` de los pagos no se toca nunca: la pone la base al crear y
+ * es lo que delata un comprobante fechado en otro mes.
+ */
+const guardarLiquidacion = async (connection, planillaId, filas, usuarioId) => {
+  let cambios = 0;
+
+  for (const fila of filas) {
+    const colaboradorId = fila.colaborador_id;
+
+    if (fila.vale) {
+      cambios += await aplicarCelda(connection, {
+        tabla: 'colaborador_vales',
+        planillaId,
+        colaboradorId,
+        celda: fila.vale,
+        etiqueta: 'vales',
+        actualizar: (id, monto) => connection.query(
+          'UPDATE colaborador_vales SET monto = ? WHERE id = ?',
+          [monto, id]
+        ),
+        insertar: (monto) => connection.query(
+          `INSERT INTO colaborador_vales
+             (colaborador_id, planilla_id, fecha, monto, descripcion, creado_por)
+           VALUES (?, ?, CURDATE(), ?, 'Vale anotado en la planilla rápida', ?)`,
+          [colaboradorId, planillaId, monto, usuarioId]
+        )
+      });
+    }
+
+    if (fila.pago) {
+      cambios += await aplicarCelda(connection, {
+        tabla: 'colaborador_pagos',
+        planillaId,
+        colaboradorId,
+        celda: fila.pago,
+        etiqueta: 'pagos',
+        actualizar: (id, monto) => connection.query(
+          'UPDATE colaborador_pagos SET monto = ?, fecha_pago = ? WHERE id = ?',
+          [monto, fila.pago.fecha_pago, id]
+        ),
+        insertar: (monto) => connection.query(
+          `INSERT INTO colaborador_pagos
+             (colaborador_id, planilla_id, monto, fecha_pago, observacion, creado_por)
+           VALUES (?, ?, ?, ?, 'Pago anotado en la planilla rápida', ?)`,
+          [colaboradorId, planillaId, monto, fila.pago.fecha_pago, usuarioId]
+        )
+      });
+    }
+  }
+
+  return cambios;
+};
+
+/**
+ * Gastos de la quincena sin día (la hoja GASTO CARRO).
+ *
+ * Aquí sí se reemplaza el conjunto completo: la pantalla muestra TODOS los
+ * gastos generales de la quincena y los deja editar todos, así que lo que
+ * llega es la lista entera. Las filas con id se actualizan (conservan su
+ * fecha y quién las creó), las nuevas se crean y las que ya no vienen se
+ * borran.
+ */
+const guardarGastosGenerales = async (connection, planilla, filas, usuarioId) => {
+  const [existentes] = await connection.query(
+    'SELECT id FROM planilla_gastos WHERE planilla_id = ? AND planilla_dia_id IS NULL',
+    [planilla.id]
+  );
+  const idsExistentes = new Set(existentes.map((g) => g.id));
+  const idsQueVienen = new Set();
+  let cambios = 0;
+
+  for (const g of filas) {
+    const monto = Number(g.monto) || 0;
+
+    if (g.id) {
+      if (!idsExistentes.has(g.id)) {
+        throw conflicto('Un gasto de la quincena ya no existe. Recargue la planilla.');
+      }
+      idsQueVienen.add(g.id);
+
+      if (monto > 0) {
+        await connection.query(
+          'UPDATE planilla_gastos SET categoria_id = ?, descripcion = ?, monto = ? WHERE id = ?',
+          [g.categoria_id, g.descripcion ?? null, monto, g.id]
+        );
+      } else {
+        await connection.query('DELETE FROM planilla_gastos WHERE id = ?', [g.id]);
+      }
+      cambios += 1;
+    } else if (monto > 0) {
+      // Sin fecha propia en la pantalla: va al último día de la quincena para
+      // que el gasto caiga en el mes correcto del resumen mensual.
+      await connection.query(
+        `INSERT INTO planilla_gastos
+           (planilla_id, planilla_dia_id, categoria_id, descripcion, monto, fecha, creado_por)
+         VALUES (?, NULL, ?, ?, ?, ?, ?)`,
+        [planilla.id, g.categoria_id, g.descripcion ?? null, monto, planilla.fecha_fin, usuarioId]
+      );
+      cambios += 1;
+    }
+  }
+
+  for (const id of idsExistentes) {
+    if (!idsQueVienen.has(id)) {
+      await connection.query('DELETE FROM planilla_gastos WHERE id = ?', [id]);
+      cambios += 1;
+    }
+  }
+
+  return cambios;
 };

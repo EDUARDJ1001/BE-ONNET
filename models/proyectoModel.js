@@ -214,3 +214,118 @@ export const eliminarAbono = async (id) => {
     throw err;
   }
 };
+
+/* ============================
+   Hoja de control (guardado en bloque)
+   ============================ */
+
+/**
+ * Guarda de una vez la hoja de control: proyectos y depósitos.
+ *
+ * Es la pantalla que imita la hoja CONTROL del Excel: se editan varias filas
+ * y se guarda con un botón. Todo va en una transacción, igual que la planilla
+ * rápida, para que un error en la fila 8 no deje guardadas las siete primeras.
+ *
+ * Un proyecto recién escrito todavía no tiene id, pero un depósito de la
+ * misma tanda puede estar asignado a él. Por eso cada proyecto trae una
+ * `clave` que pone la pantalla, y los depósitos pueden apuntar a esa clave
+ * (`proyecto_clave`) en lugar de a un id. Aquí se traduce clave -> id real.
+ *
+ * Orden: primero se crean y actualizan proyectos (para que existan los ids),
+ * después los depósitos, y al final se borra lo marcado. Borrar un proyecto
+ * deja sus depósitos sin asignar (ON DELETE SET NULL): el dinero se recibió
+ * igual y no debe desaparecer con el proyecto.
+ */
+export const guardarControl = async ({ proyectos = [], abonos = [] }, usuarioId = null) => {
+  const pool = await connectDB();
+  const connection = await pool.getConnection();
+
+  try {
+    await connection.beginTransaction();
+
+    const idPorClave = new Map();
+    let cambios = 0;
+
+    for (const p of proyectos) {
+      if (p.eliminar) continue;
+
+      if (p.id) {
+        const [r] = await connection.query(
+          'UPDATE proyectos SET nombre = ?, costo = ?, estado = ? WHERE id = ?',
+          [p.nombre, p.costo, p.estado, p.id]
+        );
+        if (r.affectedRows === 0) {
+          const error = new Error(`El proyecto "${p.nombre}" ya no existe. Recargue la hoja.`);
+          error.codigo = 'CONFLICTO_CONTROL';
+          throw error;
+        }
+        if (p.clave) idPorClave.set(p.clave, p.id);
+      } else {
+        const [r] = await connection.query(
+          'INSERT INTO proyectos (nombre, costo, estado, creado_por) VALUES (?, ?, ?, ?)',
+          [p.nombre, p.costo, p.estado, usuarioId]
+        );
+        if (p.clave) idPorClave.set(p.clave, r.insertId);
+      }
+      cambios += 1;
+    }
+
+    for (const a of abonos) {
+      if (a.eliminar) continue;
+
+      let proyectoId = a.proyecto_id ?? null;
+      if (a.proyecto_clave) {
+        if (!idPorClave.has(a.proyecto_clave)) {
+          const error = new Error('Un depósito apunta a un proyecto que no está en la hoja.');
+          error.codigo = 'CONFLICTO_CONTROL';
+          throw error;
+        }
+        proyectoId = idPorClave.get(a.proyecto_clave);
+      }
+
+      if (a.id) {
+        const [r] = await connection.query(
+          `UPDATE proyecto_abonos
+              SET monto = ?, fecha = ?, proyecto_id = ?, referencia = ?
+            WHERE id = ?`,
+          [a.monto, a.fecha, proyectoId, a.referencia ?? null, a.id]
+        );
+        if (r.affectedRows === 0) {
+          const error = new Error('Un depósito ya no existe. Recargue la hoja.');
+          error.codigo = 'CONFLICTO_CONTROL';
+          throw error;
+        }
+      } else {
+        await connection.query(
+          `INSERT INTO proyecto_abonos (proyecto_id, monto, fecha, referencia, creado_por)
+           VALUES (?, ?, ?, ?, ?)`,
+          [proyectoId, a.monto, a.fecha, a.referencia ?? null, usuarioId]
+        );
+      }
+      cambios += 1;
+    }
+
+    for (const a of abonos) {
+      if (a.eliminar && a.id) {
+        await connection.query('DELETE FROM proyecto_abonos WHERE id = ?', [a.id]);
+        cambios += 1;
+      }
+    }
+
+    for (const p of proyectos) {
+      if (p.eliminar && p.id) {
+        await connection.query('DELETE FROM proyectos WHERE id = ?', [p.id]);
+        cambios += 1;
+      }
+    }
+
+    await connection.commit();
+    return { cambios };
+  } catch (err) {
+    await connection.rollback();
+    if (!err.codigo) console.error('Error al guardar la hoja de control:', err);
+    throw err;
+  } finally {
+    connection.release();
+  }
+};

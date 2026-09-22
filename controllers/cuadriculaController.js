@@ -28,7 +28,6 @@ export const obtenerCuadriculaController = async (req, res) => {
  */
 const validar = (dias, planilla) => {
   if (!Array.isArray(dias)) return 'Se espera un arreglo "dias"';
-  if (dias.length === 0) return 'No hay nada que guardar';
 
   const fechas = new Set();
 
@@ -91,6 +90,55 @@ const validar = (dias, planilla) => {
   return null;
 };
 
+/**
+ * El bloque de abajo: una fila por colaborador con su vale y su pago.
+ * Cada celda puede venir o no; si no viene, no se toca.
+ */
+const validarLiquidacion = (filas) => {
+  if (filas === undefined) return null;
+  if (!Array.isArray(filas)) return 'Se espera un arreglo "liquidacion"';
+
+  const vistos = new Set();
+
+  for (const f of filas) {
+    const col = aId(f.colaborador_id);
+    if (!col) return 'Hay un colaborador inválido en el resumen de abajo';
+    if (vistos.has(col)) return `El colaborador ${col} viene dos veces en el resumen de abajo`;
+    vistos.add(col);
+
+    for (const [nombre, celda] of [['vale', f.vale], ['pago', f.pago]]) {
+      if (celda === undefined) continue;
+      if (celda.id !== undefined && celda.id !== null && !aId(celda.id)) {
+        return `Referencia de ${nombre} inválida`;
+      }
+      if (aMonto(celda.monto ?? 0) === null) {
+        return `El ${nombre} debe ser un número mayor o igual a 0`;
+      }
+    }
+
+    // Un pago sin fecha no sirve de comprobante: la fecha es lo que se revisa
+    // al cerrar el mes.
+    if (f.pago && Number(f.pago.monto) > 0 && !esFecha(f.pago.fecha_pago)) {
+      return 'Cada pago entregado necesita su fecha de pago';
+    }
+  }
+
+  return null;
+};
+
+const validarGastosGenerales = (filas) => {
+  if (filas === undefined) return null;
+  if (!Array.isArray(filas)) return 'Se espera un arreglo "gastosGenerales"';
+
+  for (const g of filas) {
+    if (g.id !== undefined && g.id !== null && !aId(g.id)) return 'Referencia de gasto inválida';
+    if (!aId(g.categoria_id)) return 'Cada gasto de la quincena necesita una categoría';
+    if (aMonto(g.monto ?? 0) === null) return 'Monto de gasto inválido';
+  }
+
+  return null;
+};
+
 /** Normaliza una fila antes de mandarla al modelo. */
 const normalizar = (dia) => {
   const salida = { fecha: dia.fecha };
@@ -144,14 +192,43 @@ export const guardarCuadriculaController = async (req, res) => {
       return res.status(404).json({ error: 'Planilla no encontrada' });
     }
 
-    const error = validar(req.body.dias, actual.planilla);
+    const dias = req.body.dias ?? [];
+    const { liquidacion, gastosGenerales } = req.body;
+
+    const error =
+      validar(dias, actual.planilla) ||
+      validarLiquidacion(liquidacion) ||
+      validarGastosGenerales(gastosGenerales);
     if (error) {
       return res.status(400).json({ error });
     }
 
+    if (!dias.length && !liquidacion?.length && gastosGenerales === undefined) {
+      return res.status(400).json({ error: 'No hay nada que guardar' });
+    }
+
+    const texto = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+
     const resultado = await guardarCuadricula(
       id,
-      req.body.dias.map(normalizar),
+      {
+        dias: dias.map(normalizar),
+        liquidacion: liquidacion?.map((f) => ({
+          colaborador_id: aId(f.colaborador_id),
+          vale: f.vale && { id: f.vale.id ? aId(f.vale.id) : null, monto: aMonto(f.vale.monto ?? 0) ?? 0 },
+          pago: f.pago && {
+            id: f.pago.id ? aId(f.pago.id) : null,
+            monto: aMonto(f.pago.monto ?? 0) ?? 0,
+            fecha_pago: f.pago.fecha_pago || null
+          }
+        })),
+        gastosGenerales: gastosGenerales?.map((g) => ({
+          id: g.id ? aId(g.id) : null,
+          categoria_id: aId(g.categoria_id),
+          descripcion: texto(g.descripcion),
+          monto: aMonto(g.monto ?? 0) ?? 0
+        }))
+      },
       req.usuario?.id ?? null
     );
 
@@ -160,7 +237,7 @@ export const guardarCuadriculaController = async (req, res) => {
     const cuadricula = await obtenerCuadricula(id);
     res.json({ ...resultado, cuadricula });
   } catch (err) {
-    if (err.codigo === 'PLANILLA_PAGADA') {
+    if (err.codigo === 'PLANILLA_PAGADA' || err.codigo === 'CONFLICTO_CUADRICULA') {
       return res.status(409).json({ error: err.message });
     }
     responderErrorSql(res, err, 'Error al guardar la cuadrícula');

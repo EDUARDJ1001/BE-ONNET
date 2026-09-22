@@ -7,7 +7,8 @@ import {
   obtenerAbonos,
   crearAbono,
   asignarAbono,
-  eliminarAbono
+  eliminarAbono,
+  guardarControl
 } from '../models/proyectoModel.js';
 import { aId, aMonto, aMontoPositivo, esFecha, responderErrorSql } from '../utils/validaciones.js';
 
@@ -203,5 +204,107 @@ export const eliminarAbonoController = async (req, res) => {
     res.json({ message: 'Abono eliminado correctamente' });
   } catch (err) {
     responderErrorSql(res, err, 'Error al eliminar el abono');
+  }
+};
+
+/* ============================
+   Hoja de control (guardado en bloque)
+   ============================ */
+
+/**
+ * Valida la hoja de control completa antes de tocar la base.
+ * Las filas marcadas para borrar no se validan: se van a ir.
+ */
+const validarControl = ({ proyectos, abonos }) => {
+  if (!Array.isArray(proyectos) || !Array.isArray(abonos)) {
+    return 'Se esperan los arreglos "proyectos" y "abonos"';
+  }
+
+  const claves = new Set();
+  const nombres = new Set();
+
+  for (const p of proyectos) {
+    if (p.clave) claves.add(p.clave);
+    if (p.eliminar) {
+      if (!aId(p.id)) return 'Sólo se puede borrar un proyecto ya guardado';
+      continue;
+    }
+    if (p.id !== undefined && p.id !== null && !aId(p.id)) return 'Referencia de proyecto inválida';
+
+    const nombre = typeof p.nombre === 'string' ? p.nombre.trim() : '';
+    if (!nombre) return 'Hay un proyecto sin nombre';
+
+    // El nombre es único en la base; se revisa aquí para dar un mensaje claro
+    // en vez del error genérico de clave duplicada.
+    const llave = nombre.toLowerCase();
+    if (nombres.has(llave)) return `El proyecto "${nombre}" está escrito dos veces`;
+    nombres.add(llave);
+
+    if (aMonto(p.costo ?? 0) === null) return `El costo de "${nombre}" debe ser un número mayor o igual a 0`;
+    if (p.estado && !ESTADOS.includes(p.estado)) return `Estado inválido en "${nombre}"`;
+  }
+
+  for (const a of abonos) {
+    if (a.eliminar) {
+      if (!aId(a.id)) return 'Sólo se puede borrar un depósito ya guardado';
+      continue;
+    }
+    if (a.id !== undefined && a.id !== null && !aId(a.id)) return 'Referencia de depósito inválida';
+    if (aMontoPositivo(a.monto) === null) return 'Cada depósito necesita un monto mayor que cero';
+    if (!esFecha(a.fecha)) return 'Cada depósito necesita su fecha de abono';
+    if (a.proyecto_id !== undefined && a.proyecto_id !== null && !aId(a.proyecto_id)) {
+      return 'Hay un depósito con un proyecto inválido';
+    }
+    if (a.proyecto_clave && !claves.has(a.proyecto_clave)) {
+      return 'Hay un depósito asignado a un proyecto que no está en la hoja';
+    }
+  }
+
+  return null;
+};
+
+export const guardarControlController = async (req, res) => {
+  const cuerpo = { proyectos: req.body.proyectos ?? [], abonos: req.body.abonos ?? [] };
+
+  const error = validarControl(cuerpo);
+  if (error) {
+    return res.status(400).json({ error });
+  }
+
+  const texto = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+
+  try {
+    const resultado = await guardarControl(
+      {
+        proyectos: cuerpo.proyectos.map((p) => ({
+          id: p.id ? aId(p.id) : null,
+          clave: p.clave ? String(p.clave) : null,
+          eliminar: Boolean(p.eliminar),
+          nombre: texto(p.nombre),
+          costo: aMonto(p.costo ?? 0) ?? 0,
+          estado: p.estado || 'en_proceso'
+        })),
+        abonos: cuerpo.abonos.map((a) => ({
+          id: a.id ? aId(a.id) : null,
+          eliminar: Boolean(a.eliminar),
+          monto: aMonto(a.monto ?? 0) ?? 0,
+          fecha: a.fecha,
+          proyecto_id: a.proyecto_id ? aId(a.proyecto_id) : null,
+          proyecto_clave: a.proyecto_clave ? String(a.proyecto_clave) : null,
+          referencia: texto(a.referencia)
+        }))
+      },
+      req.usuario?.id ?? null
+    );
+
+    // Se devuelve la hoja recargada: los saldos que se muestran después de
+    // guardar son los que calculó la base.
+    const [proyectos, abonos] = await Promise.all([obtenerProyectos(), obtenerAbonos({})]);
+    res.json({ ...resultado, proyectos, abonos });
+  } catch (err) {
+    if (err.codigo === 'CONFLICTO_CONTROL') {
+      return res.status(409).json({ error: err.message });
+    }
+    responderErrorSql(res, err, 'Error al guardar la hoja de control');
   }
 };
